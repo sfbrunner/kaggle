@@ -1,0 +1,142 @@
+---
+title: "kaggle_sberbank1"
+author: "Simon Brunner"
+date: "12 May 2017"
+output: html_document
+---
+
+## Source libraries
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glmnet)
+```
+
+## Load data
+```{r}
+strain = tbl_df(read.csv(file = 'data/train.csv'))
+svalidate  = tbl_df(read.csv(file = 'data/test.csv'))
+```
+
+## Merge all data
+```{r}
+svalidate_mod = svalidate
+svalidate_mod$price_doc = NA
+sdat = rbind(strain, svalidate_mod)
+```
+
+## Remove columns with NaNs
+```{r}
+sdat_cl = sdat[ , c(colSums(is.na(dplyr::select(sdat,-price_doc))) == 0,TRUE)]
+dim(sdat_cl)
+```
+
+In comparison, we could have lost a lot of observations if na-containing rows had been removed.
+```{r}
+dim(na.omit(strain))
+```
+
+## Remove some columns which have intuitively no meaning
+- Timestamp
+- ID
+```{r}
+sdat_cl = dplyr::select(sdat_cl, -id, -timestamp)
+```
+
+## Split training table into training, testing and validation set
+```{r}
+set.seed(1)
+idx_train=sample(1:nrow(strain),nrow(strain)/2)
+idx_known = c(1:nrow(strain))
+idx_validate = c((nrow(strain)+1):nrow(sdat_cl))
+idx_test = c(-idx_train, -idx_validate)
+```
+
+# Lasso
+
+## Construct model matrix
+```{r}
+options(na.action='na.pass')
+x = model.matrix(price_doc~.,sdat_cl)
+y = sdat_cl$price_doc
+```
+
+## Fit model
+```{r}
+grid = 10^seq(10, -2, length =100)
+lasso_mod =glmnet(x[idx_train,],y[idx_train],alpha = 1, lambda = grid)
+plot(lasso_mod)
+```
+
+## Perform cross-validation
+```{r}
+set.seed(1)
+cv_out = cv.glmnet(x[idx_train ,],y[idx_train],alpha=1)
+```
+
+### Analyse cross-validation results
+```{r}
+plot(cv_out) 
+bestlam = cv_out$lambda.min 
+lasso_pred=predict(lasso_mod, s=bestlam, newx=x[idx_test ,]) 
+```
+
+Test error of model with minimal tuning parameter lambda according to cross-validation:
+```{r}
+mean((lasso_pred - y[idx_test])^2)
+```
+
+## Get the final coefficients, using the CV lambda
+```{r}
+lasso_best_CV = glmnet(x[idx_known,],y[idx_known],alpha = 1, lambda = grid)
+lasso_coef = predict(lasso_best_CV ,type ="coefficients", s=bestlam)[1:20,]
+lasso_coef
+lasso_coef[lasso_coef !=0]
+```
+Ups, only full_sq is left...
+
+Let's get a (fake) R squared out
+```{r}
+y_predicted <- predict(lasso_best_CV, s = bestlam, newx = x[idx_known,])
+sst <- sum((y[idx_known] - mean(y[idx_known]))^2)
+sse <- sum((y_predicted - y[idx_known])^2)
+
+# R squared
+rsq <- 1 - sse / sst
+rsq
+```
+Not very good at all...
+
+## Apply model to validation dataset
+```{r}
+y_predicted <- predict(lasso_best_CV, s = bestlam, newx = x[idx_validate,])
+```
+
+## Prepare for submission
+```{r}
+y_predicted_df = tbl_df(as.data.frame(y_predicted))
+colnames(y_predicted_df) = c('price_doc')
+y_predicted_df$id = svalidate_mod$id
+y_predicted_df = dplyr::select(y_predicted_df, id, price_doc)
+write.csv(y_predicted_df, 'y_predicted.csv', row.names = F)
+```
+
+# Integrate macroeconomics table
+
+## Load, merge, clean data
+```{r}
+macro = tbl_df(read.csv('data/macro.csv'))
+```
+
+### Merge with training/test data using timestamp
+```{r}
+sdat_macro = left_join(sdat, macro, by='timestamp')
+```
+
+### Remove columns with NaNs and others
+```{r}
+sdat_macro_cl = sdat_macro[ , c(colSums(is.na(dplyr::select(sdat_macro,-price_doc))) == 0,TRUE)] %>%
+  dplyr::select(-id, -timestamp)
+dim(sdat_macro_cl)
+```
