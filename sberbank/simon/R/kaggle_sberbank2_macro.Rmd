@@ -15,8 +15,8 @@ library(glmnet)
 
 ## Load data
 ```{r}
-strain = tbl_df(read.csv(file = 'data/train.csv'))
-svalidate  = tbl_df(read.csv(file = 'data/test.csv'))
+strain = tbl_df(read.csv(file = '../data/train.csv'))
+svalidate  = tbl_df(read.csv(file = '../data/test.csv'))
 ```
 
 ## Merge all data
