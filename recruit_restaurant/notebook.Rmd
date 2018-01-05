@@ -157,7 +157,7 @@ x = model.matrix(visitors~., model_dat[,c(target_cols, 'visitors')])
 #x = sparse.model.matrix(is_churn~.-1, data = tree_dat %>% dplyr::select(-msno, -modtrain, -train, -fee_per_day, -ever_cancelled))
 #x = sparse.model.matrix(is_churn~.-1, data = tree_dat %>% dplyr::select(-msno, -modtrain, -train))
 max_visit = max(model_dat$visitors)
-y = model_dat$visitors/max_visit
+y = log1p(model_dat$visitors/max_visit)
 bst <- xgboost(data = x[idx_train[idx_modtrain], ],
                label = y[idx_train[idx_modtrain]], max_depth = 3, eta = 1, nrounds = 100,
                nthread = 2, objective = "reg:logistic", eval_metric='rmse')
@@ -171,9 +171,8 @@ importance
 ```
 
 ```{r}
-plt_dat = tbl_df(data.frame(known=y[idx_train[-idx_modtrain]], predicted=xg_pred))
-
-ggplot(plt_dat, aes(x=known, y=predicted)) + geom_point(size=0.2, alpha=0.1)
+tbl_df(data.frame(known=y[idx_train[-idx_modtrain]], predicted=xg_pred, untrafo=model_dat$visitors)) %>%
+  ggplot(aes(x=known, y=predicted)) + geom_point(size=0.2, alpha=0.1)
 
 ```
 
@@ -187,12 +186,41 @@ RMSE
 ```{r}
 sub_pred = predict(bst, x)
 sub_dat = model_dat
-sub_dat$visitors = sub_pred * max_visit
+sub_dat$visitors = expm1(sub_pred) * max_visit
 sub_dat = sub_dat %>% 
   mutate(id = paste(air_store_id, paste(target_year, sprintf("%02d", target_month), sprintf("%02d", target_day), sep='-'), sep='_')) %>%
   filter(test==1) %>%
   dplyr::select(id, visitors)
 sub_dat = left_join(sub_templ %>% dplyr::select(id), sub_dat, by='id')
-fwrite(sub_dat, 'submissions/xg_boost1.csv')
+fwrite(sub_dat, 'submissions/xg_boost2_log_trafo.csv')
 ```
 
+## Try ARIMA
+
+### Average (median) each day across all restaurants
+```{r}
+dat_arima_avg = model_dat %>%
+  mutate(r_date = as.Date(paste(target_year, target_month, target_day, sep='-'), format='%Y-%m-%d')) %>%
+  group_by(r_date) %>%
+  summarise(avg_visits = median(visitors)) %>% ungroup()
+
+ggplot(dat_arima_avg, aes(x=r_date, y=avg_visits)) + geom_line()
+```
+
+### Fit ARIMA
+```{r}
+arima_train = dat_arima_avg %>% filter(r_date < '2017-02-01')
+arima_test = dat_arima_avg %>% filter(r_date >= '2017-02-01', r_date < '2017-04-23')
+
+m <- arima(arima_train$avg_visits, order=c(2,1,2), seasonal= list(order=c(1,1,1), period=7))
+y_pred <- predict(m, dim(arima_test)[1])
+y_pred_tbl = tibble(visit_preds = as.numeric(y_pred$pred), r_date = arima_test$r_date)
+
+left_join(dat_arima_avg, y_pred_tbl, by='r_date') %>%
+  gather(key = 'visit_type', value='visits', c(avg_visits, visit_preds)) %>%
+  ggplot(aes(x=r_date, y=visits, color=visit_type)) + geom_line()
+
+RMSE = sqrt(mean((y_pred_tbl$visit_preds - arima_test$avg_visits)^2))
+RMSE
+
+```
