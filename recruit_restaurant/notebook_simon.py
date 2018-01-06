@@ -11,16 +11,26 @@
 # * Join with holidays data
 # * Think about what to do with hpg data...
 # 
-# Remember any features extracted from training tables need to be extractable from submission table.
+# Remember any features extracted from training tables need to be extractable 
+# from submission table.
 # 
 # Remember that we are predicting visits, not reservations.
 # 
 # Check if we have reservation data for some or all submission dates.
 #  - We have reservation data for test and training data.
 # 
-# Check if the restaurants in the submission list are all included in the training data.
+# Check if the restaurants in the submission list are all included in the 
+# training data.
 #
-# Latitude and logitude are highly correlated: can we combine to a single feature?
+# Latitude and logitude are highly correlated: can we combine to a single 
+# feature?
+#
+# ## For the time-series modelling, how should we organise the data?
+# * Average over all restaurants
+# * Treat every restaurant separately
+# * Combine restaurants by genre
+# * Combine restaurants by geographical location (create clusters maybe)
+# * fbprophet allows a holiday flag to be added. 
 
 # ## Loading modules
 
@@ -53,7 +63,8 @@ date_info.tail()
 # Extract info from dates
 # First, define a little function to extract year, month, day, hour
 
-def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S", prefix=None):
+def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S", 
+                  prefix=None):
     """Extract the year, month, day, weekday and hour from the data for use as
     features"""
     if not prefix:
@@ -67,20 +78,65 @@ def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S", prefix=None
     pd_df.drop(target_var, inplace=True, axis=1)
     return pd_df
 
+#%%%
+    
+#def timeSeriesPreprocessing(air_visit_data):
+#    """ Preprocessing of data for fbprophet time-series modelling """
+
+from fbprophet import Prophet
+import matplotlib.pyplot as plt
+m=Prophet(yearly_seasonality=True)
+
+# Average over all restaurants
+prophetData=air_visit_data[['visit_date','visitors']]
+prophetData.columns=['ds','y']
+newProphet=prophetData.groupby(['ds'],axis=0).mean().reset_index()
+m.fit(newProphet)
+future = m.make_future_dataframe(periods=100)
+forecast = m.predict(future)
+m.plot(forecast)
+m.plot_components(forecast);
+
+#%%
+# Average over genres 
+prophetData=pd.concat([air_visit_data[['visit_date','visitors']],
+                       air_store_info[['air_genre_name']]],axis=1)
+newProphet=prophetData.groupby(['air_genre_name','visit_date'],axis=0).mean().reset_index()
+uniqueGenres=newProphet.air_genre_name.unique()
+for genre in uniqueGenres:
+    m=Prophet(yearly_seasonality=True)
+    thisProphet=newProphet.loc[newProphet['air_genre_name']==genre]
+    thisProphet=thisProphet.drop(['air_genre_name'],axis=1)
+    thisProphet.columns=['ds','y']
+    m.fit(thisProphet)
+    future = m.make_future_dataframe(periods=100)
+    forecast = m.predict(future)
+    m.plot(forecast)
+    #m.plot_components(forecast);
+    
+# Note: Some of these have so little data that predictions are completely off. 
+# Can this be fixed by merging with hpg_data?
+
+#%%%
 def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                      hpg_store_info, date_info, sample_submission, 
                      store_id_relation):
     """ Preprocessing of data for stochastic gradient descent modelling """
 
-    hpg_reserve = extract_dates(pd_df = hpg_reserve, target_var = 'visit_datetime', prefix='target')
-    hpg_reserve = extract_dates(pd_df = hpg_reserve, target_var = 'reserve_datetime')
+    hpg_reserve = extract_dates(pd_df = hpg_reserve, 
+                                target_var = 'visit_datetime', prefix='target')
+    hpg_reserve = extract_dates(pd_df = hpg_reserve, 
+                                target_var = 'reserve_datetime')
     hpg_reserve.head()
     
-    air_reserve = extract_dates(pd_df = air_reserve, target_var = 'visit_datetime', prefix='target')
-    air_reserve = extract_dates(pd_df = air_reserve, target_var = 'reserve_datetime')
+    air_reserve = extract_dates(pd_df = air_reserve, 
+                                target_var = 'visit_datetime', prefix='target')
+    air_reserve = extract_dates(pd_df = air_reserve, 
+                                target_var = 'reserve_datetime')
     air_reserve.pivot_table(columns='reserve_datetime_weekday')
     
-    date_info = extract_dates(pd_df = date_info, target_var = 'calendar_date', format_str="%Y-%m-%d", prefix='date')
+    date_info = extract_dates(pd_df = date_info, target_var = 'calendar_date', 
+                              format_str="%Y-%m-%d", prefix='date')
     date_info.drop('date_hour', inplace=True, axis=1)
     date_info.pivot_table(columns='day_of_week')
     
@@ -101,7 +157,8 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
     x.rename(columns={'id1':'store_type'}, inplace=True)
     x.drop('id2', inplace=True, axis=1)
-    x = extract_dates(pd_df = x, target_var = 'date', format_str="%Y-%m-%d", prefix='target')
+    x = extract_dates(pd_df = x, target_var = 'date', format_str="%Y-%m-%d", 
+                      prefix='target')
     x.drop('target_hour', inplace=True, axis=1)
     x['test'] = 1
     x.head()
@@ -160,7 +217,8 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     
     #%%
     
-    main_tbl_merge = pd.merge(left=main_tbl_merge2, right=date_info_merge, on='date_id')
+    main_tbl_merge = pd.merge(left=main_tbl_merge2, right=date_info_merge, 
+                              on='date_id')
     main_tbl_merge.describe()
     
     #%%
@@ -182,8 +240,9 @@ import numpy as np
 def plot_corr(size=8):
     """ Plot the correlation between features"""
     model_data = pd.read_csv('output/main_tbl.csv')
-    target_cols = ['target_day', 'target_month', 'target_weekday', 'target_year', 'latitude', 'longitude', 'holiday_flg',
-              'test','visitors']
+    target_cols = ['target_day', 'target_month', 'target_weekday', 
+                   'target_year', 'latitude', 'longitude', 'holiday_flg',
+                   'test','visitors']
     X = model_data[target_cols]
     
     font={'size':16}
@@ -214,8 +273,9 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 def SGDFit():
     """ Fit with a stochastic gradient descent classifier """
     model_data = pd.read_csv('output/main_tbl.csv')
-    target_cols = ['target_day', 'target_month', 'target_weekday', 'target_year', 'latitude', 'longitude', 'holiday_flg',
-                  'test','visitors']
+    target_cols = ['target_day', 'target_month', 'target_weekday', 
+                   'target_year', 'latitude', 'longitude', 'holiday_flg', 
+                   'test','visitors']
     X = model_data[target_cols]
     target_cols_fit = [col for col in X.columns if not col in ['test','visitors']]
     Xsub=X[X['test']==1]
@@ -229,7 +289,10 @@ def SGDFit():
     pipe = Pipeline([('scal',StandardScaler()),
                      ('clf',mod)])
     
-    X_train, X_test, y_train, y_test = train_test_split(X[target_cols_fit], X['visitors'],test_size=0.15, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X[target_cols_fit], 
+                                                        X['visitors'],
+                                                        test_size=0.15, 
+                                                        random_state=42)
     
     parameters = {'clf__alpha': np.logspace(-4,1,6)}
     pipe = GridSearchCV(pipe, parameters)
@@ -240,7 +303,8 @@ def SGDFit():
     #%%
     # Create a table of real vs predicted
     testIndices=X_test.index.values
-    prediction = pd.Series(pipe.predict(X_test), name='Prediction', index=testIndices)
+    prediction = pd.Series(pipe.predict(X_test), name='Prediction', 
+                           index=testIndices)
     y_test.name='Real'
     resultsvsPredictions = pd.concat([prediction, y_test], axis=1)
     
