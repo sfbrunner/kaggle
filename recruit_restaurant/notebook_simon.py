@@ -89,11 +89,14 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error
 import numpy as np
+import logging
+logging.getLogger('fbprophet.forecaster').propagate = False
 
 m=Prophet()
 
 prophetData = air_visit_data[['visit_date','visitors']]
 prophetData.columns = ['ds','y']
+
 newProphet=prophetData.groupby(['ds'],axis=0).mean().reset_index()
 prophetTrain, prophetTest = train_test_split(newProphet, test_size=0.25, 
                                              random_state=42)
@@ -109,21 +112,28 @@ prophetData=pd.concat([air_visit_data[['visit_date','visitors']],
                        air_store_info[['air_genre_name']]],axis=1)
 newProphet=prophetData.groupby(['air_genre_name','visit_date'],axis=0)\
                                                     .mean().reset_index()
+                                                    
+allDays = pd.date_range(prophetData.visit_date.min(), 
+                         prophetData.visit_date.max())
+
+
 uniqueGenres=newProphet.air_genre_name.unique()
 errorSeparate=[]
 for genre in uniqueGenres:
-    m=Prophet(yearly_seasonality=True)
+    m=Prophet()
     thisProphet=newProphet.loc[newProphet['air_genre_name']==genre]
     thisProphet=thisProphet.drop(['air_genre_name'],axis=1)
+    thisProphet['visit_date']=pd.to_datetime(thisProphet['visit_date'])
+    thisProphet = thisProphet.set_index('visit_date')
+    thisProphet = thisProphet.reindex(allDays).fillna(0).reset_index()
     thisProphet.columns=['ds','y']
+    
     prophetTrain, prophetTest = train_test_split(thisProphet, test_size=0.15, 
                                              random_state=42)
-    if len(prophetTrain)<=2 or len(prophetTest)==0:
-        continue
-    else:
-        m.fit(prophetTrain)
-        forecast = m.predict(pd.DataFrame(prophetTest['ds']))
-        errorSeparate.append(mean_squared_error(prophetTest['y'], 
+
+    m.fit(prophetTrain)
+    forecast = m.predict(pd.DataFrame(prophetTest['ds']))
+    errorSeparate.append(mean_squared_error(prophetTest['y'], 
                                                 forecast['yhat']))
         #m.plot(forecast)
         #m.plot_components(forecast);
