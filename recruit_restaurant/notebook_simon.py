@@ -79,43 +79,70 @@ def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
     return pd_df
 
 #%%%
-    
+# Average over all restaurants
+
 #def timeSeriesPreprocessing(air_visit_data):
 #    """ Preprocessing of data for fbprophet time-series modelling """
 
 from fbprophet import Prophet
 import matplotlib.pyplot as plt
-m=Prophet(yearly_seasonality=True)
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import mean_squared_error
+import numpy as np
 
-# Average over all restaurants
-prophetData=air_visit_data[['visit_date','visitors']]
-prophetData.columns=['ds','y']
+m=Prophet()
+
+prophetData = air_visit_data[['visit_date','visitors']]
+prophetData.columns = ['ds','y']
 newProphet=prophetData.groupby(['ds'],axis=0).mean().reset_index()
-m.fit(newProphet)
-future = m.make_future_dataframe(periods=100)
-forecast = m.predict(future)
-m.plot(forecast)
-m.plot_components(forecast);
+prophetTrain, prophetTest = train_test_split(newProphet, test_size=0.25, 
+                                             random_state=42)
+m.fit(prophetTrain)
+forecast = m.predict(pd.DataFrame(prophetTest['ds']))
+errorBulk = mean_squared_error(prophetTest['y'],forecast['yhat'])
+print("Error when trained in bulk is {:.1f}".format(errorBulk))
+
 
 #%%
 # Average over genres 
 prophetData=pd.concat([air_visit_data[['visit_date','visitors']],
                        air_store_info[['air_genre_name']]],axis=1)
-newProphet=prophetData.groupby(['air_genre_name','visit_date'],axis=0).mean().reset_index()
+newProphet=prophetData.groupby(['air_genre_name','visit_date'],axis=0)\
+                                                    .mean().reset_index()
 uniqueGenres=newProphet.air_genre_name.unique()
+errorSeparate=[]
 for genre in uniqueGenres:
     m=Prophet(yearly_seasonality=True)
     thisProphet=newProphet.loc[newProphet['air_genre_name']==genre]
     thisProphet=thisProphet.drop(['air_genre_name'],axis=1)
     thisProphet.columns=['ds','y']
-    m.fit(thisProphet)
-    future = m.make_future_dataframe(periods=100)
-    forecast = m.predict(future)
-    m.plot(forecast)
-    #m.plot_components(forecast);
-    
+    prophetTrain, prophetTest = train_test_split(thisProphet, test_size=0.15, 
+                                             random_state=42)
+    if len(prophetTrain)<=2 or len(prophetTest)==0:
+        continue
+    else:
+        m.fit(prophetTrain)
+        forecast = m.predict(pd.DataFrame(prophetTest['ds']))
+        errorSeparate.append(mean_squared_error(prophetTest['y'], 
+                                                forecast['yhat']))
+        #m.plot(forecast)
+        #m.plot_components(forecast);
+
+print("Error when trained using genres separately is {:.1f}"\
+      .format(np.mean(errorSeparate)))
+
 # Note: Some of these have so little data that predictions are completely off. 
-# Can this be fixed by merging with hpg_data?
+# This is especially significant if we use area rather than genre. Can we 
+# cluster the restaurants somehow and train each cluster separately?
+ 
+#%%
+#Prepare data for submission
+    
+x = sample_submission.join(sample_submission['id'].str.split('_', 1, 
+                           expand=True).rename(columns={0:'id1', 1:'id2'}))
+x['id2'], x['date'] = x['id2'].str.split('_', 1).str
+x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
+x.drop(['id','id1','id2'], inplace=True, axis=1)
 
 #%%%
 def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
@@ -152,7 +179,8 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     # Extract dates and location from submission table
     # First, split up id column
     
-    x = sample_submission.join(sample_submission['id'].str.split('_', 1, expand=True).rename(columns={0:'id1', 1:'id2'}))
+    x = sample_submission.join(sample_submission['id'].str.split('_', 1, 
+                               expand=True).rename(columns={0:'id1', 1:'id2'}))
     x['id2'], x['date'] = x['id2'].str.split('_', 1).str
     x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
     x.rename(columns={'id1':'store_type'}, inplace=True)
@@ -235,8 +263,6 @@ SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
 
 #%% Plotting 
 
-import matplotlib.pyplot as plt
-import numpy as np
 def plot_corr(size=8):
     """ Plot the correlation between features"""
     model_data = pd.read_csv('output/main_tbl.csv')
