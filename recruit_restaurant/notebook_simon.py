@@ -10,12 +10,12 @@
 # * Join with actual air visit data
 # * Join with holidays data
 # * Think about what to do with hpg data...
-# 
-# Remember any features extracted from training tables need to be extractable 
+#
+# Remember any features extracted from training tables need to be extractable
 # from submission table.
-# 
+#
 # Remember that we are predicting visits, not reservations.
-# 
+#
 # Check if we have reservation data for some or all submission dates.
 #  - We have reservation data for test and training data.
 # 
@@ -92,8 +92,6 @@ import numpy as np
 import logging
 logging.getLogger('fbprophet.forecaster').propagate = False
 
-
-
 prophetData = air_visit_data[['visit_date','visitors']]
 allDays = pd.date_range(prophetData.visit_date.min(), 
                          prophetData.visit_date.max())
@@ -122,12 +120,14 @@ newProphet=prophetData.groupby(['air_genre_name','visit_date'],axis=0)\
 
 uniqueGenres=newProphet.air_genre_name.unique()
 errorSeparate=[]
+noTrainingPoints=[]
 for genre in uniqueGenres:
     m=Prophet(holidays=holidays)
     thisProphet=newProphet.loc[newProphet['air_genre_name']==genre]
     thisProphet=thisProphet.drop(['air_genre_name'],axis=1)
     thisProphet['visit_date']=pd.to_datetime(thisProphet['visit_date'])
     thisProphet = thisProphet.set_index('visit_date')
+    noTrainingPoints.append(len(thisProphet))
     thisProphet = thisProphet.reindex(allDays).fillna(thisProphet.visitors.mean()).reset_index()
     thisProphet.columns=['ds','y']
     
@@ -146,8 +146,61 @@ print("Error when trained using genres separately is {:.1f}"\
 
 # Note: Some of these have so little data that predictions are completely off. 
 # This is especially significant if we use area rather than genre. Can we 
-# cluster the restaurants somehow and train each cluster separately?
- 
+# cluster the restaurants somehow and train each cluster separately? 
+
+# It's not fair to fill NaNs and then split - the predictions will then 
+# be great when there are very few data points. Not really any way to get
+# around this however, because some genres just don't have enough data points.
+# *Cluster
+# *Remove restaurants not in the submission data (perhaps we don't even need
+#   to make predictions on the training data with very few points)
+
+#%%
+# Cluster data geographically and then train - distances are close so lets just
+# use k-means rather than DBSCAN or something that works better on the globe. 
+
+from sklearn.cluster import KMeans
+
+prophetData = pd.merge(air_visit_data, 
+                       air_store_info[['air_store_id', 'latitude','longitude']], 
+                       on='air_store_id')
+
+kmeans = KMeans(n_clusters=10, random_state = 42).\
+                fit(air_store_info[['latitude','longitude']])
+
+prophetData['clusterNo']=kmeans.predict(prophetData[['latitude','longitude']])
+prophetData = prophetData.drop(['latitude','longitude'],axis=1)
+# prophetData.hist(column='clusterNo')
+
+newProphet=prophetData.groupby(['clusterNo','visit_date'],axis=0)\
+                                                    .mean().reset_index()
+
+uniqueClusters=newProphet.clusterNo.unique()
+errorClusters=[]
+
+for cluster in uniqueClusters:
+    m=Prophet(holidays=holidays)
+    thisProphet=newProphet.loc[newProphet['clusterNo']==cluster]
+    thisProphet=thisProphet.drop(['clusterNo'],axis=1)
+    thisProphet['visit_date']=pd.to_datetime(thisProphet['visit_date'])
+    thisProphet = thisProphet.set_index('visit_date')
+    thisProphet = thisProphet.reindex(allDays)\
+                    .fillna(thisProphet.visitors.mean()).reset_index()
+    thisProphet.columns=['ds','y']
+    
+    prophetTrain, prophetTest = train_test_split(thisProphet, test_size=0.15, 
+                                             random_state=42)
+
+    m.fit(prophetTrain)
+    forecast = m.predict(pd.DataFrame(prophetTest['ds']))
+    errorClusters.append(mean_squared_error(prophetTest['y'], 
+                                                forecast['yhat']))
+    #m.plot(forecast)
+    #m.plot_components(forecast);
+
+print("Error when trained using separate clusters is {:.1f}"\
+      .format(np.mean(errorClusters)))
+
 #%%
 #Prepare data for submission
     
