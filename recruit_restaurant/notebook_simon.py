@@ -86,25 +86,32 @@ def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
 
 from fbprophet import Prophet
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 import numpy as np
 import logging
 logging.getLogger('fbprophet.forecaster').propagate = False
 
-m=Prophet()
+
 
 prophetData = air_visit_data[['visit_date','visitors']]
-prophetData.columns = ['ds','y']
+allDays = pd.date_range(prophetData.visit_date.min(), 
+                         prophetData.visit_date.max())
+holidays = date_info.loc[date_info['holiday_flg']==1]
+holidays = holidays[['calendar_date']]
+holidays.columns = ['ds']
+holidays['holiday'] = 'Holiday'
 
+prophetData.columns = ['ds','y']
 newProphet=prophetData.groupby(['ds'],axis=0).mean().reset_index()
 prophetTrain, prophetTest = train_test_split(newProphet, test_size=0.25, 
                                              random_state=42)
+m=Prophet(holidays=holidays)
 m.fit(prophetTrain)
 forecast = m.predict(pd.DataFrame(prophetTest['ds']))
 errorBulk = mean_squared_error(prophetTest['y'],forecast['yhat'])
 print("Error when trained in bulk is {:.1f}".format(errorBulk))
-
+# Would mean absolute error be a better metric?
 
 #%%
 # Average over genres 
@@ -112,20 +119,16 @@ prophetData=pd.concat([air_visit_data[['visit_date','visitors']],
                        air_store_info[['air_genre_name']]],axis=1)
 newProphet=prophetData.groupby(['air_genre_name','visit_date'],axis=0)\
                                                     .mean().reset_index()
-                                                    
-allDays = pd.date_range(prophetData.visit_date.min(), 
-                         prophetData.visit_date.max())
-
 
 uniqueGenres=newProphet.air_genre_name.unique()
 errorSeparate=[]
 for genre in uniqueGenres:
-    m=Prophet()
+    m=Prophet(holidays=holidays)
     thisProphet=newProphet.loc[newProphet['air_genre_name']==genre]
     thisProphet=thisProphet.drop(['air_genre_name'],axis=1)
     thisProphet['visit_date']=pd.to_datetime(thisProphet['visit_date'])
     thisProphet = thisProphet.set_index('visit_date')
-    thisProphet = thisProphet.reindex(allDays).fillna(0).reset_index()
+    thisProphet = thisProphet.reindex(allDays).fillna(thisProphet.visitors.mean()).reset_index()
     thisProphet.columns=['ds','y']
     
     prophetTrain, prophetTest = train_test_split(thisProphet, test_size=0.15, 
@@ -135,8 +138,8 @@ for genre in uniqueGenres:
     forecast = m.predict(pd.DataFrame(prophetTest['ds']))
     errorSeparate.append(mean_squared_error(prophetTest['y'], 
                                                 forecast['yhat']))
-        #m.plot(forecast)
-        #m.plot_components(forecast);
+    #m.plot(forecast)
+    #m.plot_components(forecast);
 
 print("Error when trained using genres separately is {:.1f}"\
       .format(np.mean(errorSeparate)))
@@ -148,11 +151,11 @@ print("Error when trained using genres separately is {:.1f}"\
 #%%
 #Prepare data for submission
     
-x = sample_submission.join(sample_submission['id'].str.split('_', 1, 
-                           expand=True).rename(columns={0:'id1', 1:'id2'}))
-x['id2'], x['date'] = x['id2'].str.split('_', 1).str
-x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
-x.drop(['id','id1','id2'], inplace=True, axis=1)
+#x = sample_submission.join(sample_submission['id'].str.split('_', 1, 
+#                           expand=True).rename(columns={0:'id1', 1:'id2'}))
+#x['id2'], x['date'] = x['id2'].str.split('_', 1).str
+#x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
+#x.drop(['id','id1','id2'], inplace=True, axis=1)
 
 #%%%
 def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
@@ -269,8 +272,6 @@ SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
                               hpg_reserve, hpg_store_info, date_info, 
                               sample_submission, store_id_relation)
 
-
-
 #%% Plotting 
 
 def plot_corr(size=8):
@@ -291,7 +292,8 @@ def plot_corr(size=8):
     plt.show()
     print(corr.columns)
 
-plot_corr()
+#plot_corr()
+    
 # It looks like there is a strong correlation between latitude and longitude, 
 # can we combine them into a single feature?
 
@@ -313,7 +315,8 @@ def SGDFit():
                    'target_year', 'latitude', 'longitude', 'holiday_flg', 
                    'test','visitors']
     X = model_data[target_cols]
-    target_cols_fit = [col for col in X.columns if not col in ['test','visitors']]
+    target_cols_fit = [col for col in X.columns if not col in ['test',
+                                                               'visitors']]
     Xsub=X[X['test']==1]
     X=X[X['test']==0]
     
@@ -336,21 +339,23 @@ def SGDFit():
     pipe.fit(X_train,y_train)
     print(pipe.best_params_)
     
-    #%%
     # Create a table of real vs predicted
     testIndices=X_test.index.values
     prediction = pd.Series(pipe.predict(X_test), name='Prediction', 
                            index=testIndices)
     y_test.name='Real'
-    resultsvsPredictions = pd.concat([prediction, y_test], axis=1)
+    # resultsvsPredictions = pd.concat([prediction, y_test], axis=1)
     
-    scores = cross_val_score(pipe,X_test,y_test, scoring='neg_mean_squared_error')
-    scores_base=cross_val_score(pipe, X_test,pd.Series(np.ones(len(y_test))*y_test.mean()))
+    scores = cross_val_score(pipe,X_test,y_test, 
+                             scoring='neg_mean_squared_error')
+    #scores = mean_squared_error(y_test,prediction)
+    scores_base=cross_val_score(pipe, X_test,
+                                pd.Series(np.ones(len(y_test))*y_test.mean()))
     
     print("Trained mean squared error is {:.1f} and untrained is {:.1f}"\
-              .format(scores.mean(),scores_base.mean()))
+              .format(np.abs(scores.mean()),np.abs(scores_base.mean())))
     
-    #%% Do predictions for submission
+    # Do predictions for submission
     
     Xsub['visitors']=pipe.predict(Xsub[target_cols_fit])
     SGD_sub=pd.read_csv('submissions/baseline.csv')
