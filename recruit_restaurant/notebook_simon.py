@@ -102,8 +102,22 @@ def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
     pd_df.drop(target_var, inplace=True, axis=1)
     return pd_df
 
+
 # %%
-# Average over all restaurants
+# Prepare data for submission
+
+
+subTable = sample_submission.join(sample_submission['id'].str.
+                                  split('_', 1, expand=True).
+                                  rename(columns={0: 'id1', 1: 'id2'}))
+subTable['id2'], subTable['ds'] = subTable['id2'].str.split('_', 1).str
+subTable['air_store_id'] = subTable[['id1', 'id2']]\
+                            .apply(lambda x: '_'.join(x), axis=1)
+subTable.drop(['id', 'id1', 'id2'], inplace=True, axis=1)
+
+
+# %%
+# Fbprophet - Average over all restaurants
 
 # def timeSeriesPreprocessing(air_visit_data):
 #    """ Preprocessing of data for fbprophet time-series modelling """
@@ -123,10 +137,23 @@ prophetTrain, prophetTest = train_test_split(newProphet, test_size=0.25,
                                              random_state=42)
 m = Prophet(holidays=holidays)
 m.fit(prophetTrain)
-forecast = m.predict(pd.DataFrame(prophetTest['ds']))
-errorBulk = mean_squared_error(prophetTest['y'], forecast['yhat'])
+testForecast = m.predict(prophetTest[['ds']])
+
+errorBulk = mean_squared_error(prophetTest['y'], testForecast['yhat'])
 print("Error when trained in bulk is {:.1f}".format(errorBulk))
 # Would mean absolute error be a better metric?
+
+uniqueForecastDates = pd.DataFrame(
+        subTable.ds.unique().astype(str), columns=['ds'])
+subForecast = m.predict(uniqueForecastDates)
+subForecast['ds'] = subForecast['ds'].astype(str)
+
+avgSubTable = subTable.merge(subForecast[['ds', 'yhat']], on='ds')
+avgSubTable['air_store_id'] = avgSubTable[['air_store_id', 'ds']].\
+                                apply(lambda x: '_'.join(x), axis=1)
+avgSubTable.drop(['visitors', 'ds'], inplace=True, axis=1)
+avgSubTable.columns = ['id', 'visitors']
+avgSubTable.to_csv('submissions/avgFbProphet.csv', index=False)
 
 # %%
 # Average over genres
@@ -217,14 +244,6 @@ for cluster in uniqueClusters:
 print("Error when trained using separate clusters is {:.1f}"
       .format(np.mean(errorClusters)))
 
-# %%
-# Prepare data for submission
-
-# x = sample_submission.join(sample_submission['id'].str.split('_', 1,
-#                           expand=True).rename(columns={0:'id1', 1:'id2'}))
-# x['id2'], x['date'] = x['id2'].str.split('_', 1).str
-# x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
-# x.drop(['id','id1','id2'], inplace=True, axis=1)
 
 # %%
 
@@ -318,8 +337,10 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
 
     date_info_merge = date_info
     date_info_merge['date_id'] = date_info_merge[['date_year',
-                   'date_month', 'date_day']].astype(str).\
-                   apply(lambda x: '_'.join((x)), axis=1)
+                                                  'date_month', 'date_day']].\
+                                                   astype(str).\
+                                                   apply(lambda x: '_'.
+                                                         join((x)), axis=1)
     date_info_merge = date_info_merge[['holiday_flg', 'date_id']]
     date_info_merge.head()
 
@@ -327,8 +348,10 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
 
     main_tbl_merge2 = main_tbl_merge
     main_tbl_merge2['date_id'] = main_tbl_merge2[['target_year',
-                   'target_month', 'target_day']].astype(str).\
-                   apply(lambda x: '_'.join((x)), axis=1)
+                                                  'target_month', 'target_day']].\
+                                                   astype(str).\
+                                                   apply(lambda x: '_'.
+                                                         join((x)), axis=1)
 
     main_tbl_merge2.head()
 
