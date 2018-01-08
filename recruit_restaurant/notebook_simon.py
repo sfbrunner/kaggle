@@ -169,6 +169,8 @@ allGenreDates = pd.DataFrame(list(product(uniqueGenres,uniqueForecastDates['ds']
 errorSeparate = []
 noTrainingPoints = []
 totalPred = pd.DataFrame()
+# Predict the average if there are too few training points. 
+minNoTrainingPoints = 20 
 for genre in uniqueGenres:
     m = Prophet(holidays=holidays)
     thisProphet = newProphet.loc[newProphet['air_genre_name'] == genre]
@@ -176,25 +178,23 @@ for genre in uniqueGenres:
     thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
     thisProphet = thisProphet.set_index('visit_date')
     noTrainingPoints.append(len(thisProphet))
-    thisProphet = thisProphet.reindex(allDays).fillna(
-            thisProphet.visitors.mean()).reset_index()
+    if len(thisProphet) < minNoTrainingPoints:
+        thisProphet = thisProphet.reindex(allDays).fillna(
+                thisProphet.visitors.mean()).reset_index()
+    else:
+        thisProphet = thisProphet.reindex(allDays).reset_index()
     thisProphet.columns = ['ds', 'y']
 
-    prophetTrain, prophetTest = train_test_split(thisProphet, test_size=0.15,
-                                                 random_state=42)
-
-    m.fit(prophetTrain)
-    forecast = m.predict(pd.DataFrame(prophetTest['ds']))
-    errorSeparate.append(mean_squared_error(prophetTest['y'],
-                                            forecast['yhat']))
+    m.fit(thisProphet)
     thisSubPred = m.predict(uniqueForecastDates)
-    thisSubPred['ds'] = thisSubData['ds'].astype(str)
-    totalPred[genre] = thisSubData[['yhat']]
+    # m.plot(thisSubPred)
+    thisSubPred['ds'] = thisSubPred['ds'].astype(str)
+    totalPred[genre] = thisSubPred[['yhat']]
 
 totalPred = pd.melt(totalPred)
 totalPred = totalPred.rename(columns={'variable': 'genres', 'value': 'y'})
 totalPred['ds'] = allGenreDates['ds']
-
+totalPred.y.loc[totalPred['y'] < 0] = 0
 genreSubTable = subTable.merge(air_store_info[['air_store_id','air_genre_name']],
                                on='air_store_id')
 genreSubTable = genreSubTable.merge(totalPred, left_on=['air_genre_name','ds'],
@@ -202,12 +202,9 @@ genreSubTable = genreSubTable.merge(totalPred, left_on=['air_genre_name','ds'],
 genreSubTable['air_store_id'] = genreSubTable[['air_store_id', 'ds']].\
                                 apply(lambda x: '_'.join(x), axis=1)
 genreSubTable.drop(['visitors','ds','air_genre_name','genres'], 
-                   axis=1,inplace=True)
+                   axis=1, inplace=True)
 genreSubTable.columns = ['id', 'visitors']
 genreSubTable.to_csv('submissions/genreFbProphet.csv', index=False)
-
-print("Error when trained using genres separately is {:.1f}"
-      .format(np.mean(errorSeparate)))
 
 # Note: Some of these have so little data that predictions are completely off.
 # This is especially significant if we use area rather than genre. Can we
@@ -216,6 +213,8 @@ print("Error when trained using genres separately is {:.1f}"
 # It's not fair to fill NaNs and then split - the predictions will then
 # be great when there are very few data points. Not really any way to get
 # around this however, because some genres just don't have enough data points.
+# *Just make a prediction based on all of the data and submit data to kaggle
+#  to find out the score
 
 # %%
 # Cluster data geographically and then train - distances are close so lets just
