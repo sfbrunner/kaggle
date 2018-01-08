@@ -54,7 +54,6 @@ logging.getLogger('fbprophet.forecaster').propagate = False
 
 
 # ## Loading raw data
-
 air_reserve = pd.read_csv('input/air_reserve.csv')
 air_store_info = pd.read_csv('input/air_store_info.csv')
 air_visit_data = pd.read_csv('input/air_visit_data.csv')
@@ -64,57 +63,24 @@ date_info = pd.read_csv('input/date_info.csv')
 sample_submission = pd.read_csv('input/sample_submission.csv')
 store_id_relation = pd.read_csv('input/store_id_relation.csv')
 
-# %%
-# Checking submission samples
-# What's interesting is that predictions are only required for places in the
-# "air" booking system. Thus, how should we use HPG infos?
-
-sample_submission.sort_values('id').tail()
-
-# %%
-# A look at date_info table
-# Good news: seems like we get the holiday info for every date in the
-# submission table.
-
-date_info.tail()
-
-# %%
-# Extract info from dates
-# First, define a little function to extract year, month, day, hour
-
-
-def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
-                  prefix=None):
-    """Extract the year, month, day, weekday and hour from the data for use as
-    features"""
-    if not prefix:
-        prefix = target_var
-    pd_df[target_var] = pd.to_datetime(pd_df[target_var], format=format_str)
-    pd_df['{0}_year'.format(prefix)] = pd.DatetimeIndex(
-            pd_df[target_var]).year
-    pd_df['{0}_month'.format(prefix)] = pd.DatetimeIndex(
-            pd_df[target_var]).month
-    pd_df['{0}_day'.format(prefix)] = pd.DatetimeIndex(
-            pd_df[target_var]).day
-    pd_df['{0}_weekday'.format(prefix)] = pd.DatetimeIndex(
-            pd_df[target_var]).weekday
-    pd_df['{0}_hour'.format(prefix)] = pd.DatetimeIndex(
-            pd_df[target_var]).hour
-    pd_df.drop(target_var, inplace=True, axis=1)
-    return pd_df
-
-
-# %%
+# %% 
 # Prepare data for submission
 
 
-subTable = sample_submission.join(sample_submission['id'].str.
-                                  split('_', 1, expand=True).
-                                  rename(columns={0: 'id1', 1: 'id2'}))
-subTable['id2'], subTable['ds'] = subTable['id2'].str.split('_', 1).str
-subTable['air_store_id'] = subTable[['id1', 'id2']]\
-                            .apply(lambda x: '_'.join(x), axis=1)
-subTable.drop(['id', 'id1', 'id2'], inplace=True, axis=1)
+def prepareFBProphetSubmission(sample_submission):
+    """ Prepare a submission table for use in fbprophet predictions """
+    subTable = sample_submission.join(sample_submission['id'].str.
+                                      split('_', 1, expand=True).
+                                      rename(columns={0: 'id1', 1: 'id2'}))
+    subTable['id2'], subTable['ds'] = subTable['id2'].str.split('_', 1).str
+    subTable['air_store_id'] = subTable[['id1', 'id2']]\
+                                .apply(lambda x: '_'.join(x), axis=1)
+    subTable.drop(['id', 'id1', 'id2'], inplace=True, axis=1)
+
+    return subTable
+
+
+subTable = prepareFBProphetSubmission(sample_submission)
 
 
 # %%
@@ -122,7 +88,6 @@ subTable.drop(['id', 'id1', 'id2'], inplace=True, axis=1)
 
 # def timeSeriesPreprocessing(air_visit_data):
 #    """ Preprocessing of data for fbprophet time-series modelling """
-
 
 prophetData = air_visit_data[['visit_date', 'visitors']]
 allDays = pd.date_range(prophetData.visit_date.min(),
@@ -156,16 +121,55 @@ avgSubTable.drop(['visitors', 'ds'], inplace=True, axis=1)
 avgSubTable.columns = ['id', 'visitors']
 avgSubTable.to_csv('submissions/avgFbProphet.csv', index=False)
 
+
 # %%
-# Average over genres
+# FBProphet - Predict each name separately 
+
+prophetData = air_visit_data
+
+uniqueNames = prophetData.air_store_id.unique()
+allNameDates = pd.DataFrame(list(product(uniqueNames,uniqueForecastDates['ds'])),
+                             columns=['genres', 'ds'])
+# forecastDates = 
+totalPred = pd.DataFrame()
+loopNo=0
+
+for storeName in uniqueNames:
+    m = Prophet(holidays=holidays)
+    thisProphet = prophetData[prophetData['air_store_id']==storeName]
+    thisProphet.drop(['air_store_id'], inplace=True, axis=1)
+    thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
+    thisProphet = thisProphet.set_index('visit_date')
+    thisProphet = thisProphet.reindex(allDays).fillna(
+            thisProphet.visitors.mean()).reset_index()
+    thisProphet.columns = ['ds','y']
+    m.fit(thisProphet)
+    thisSubPred = m.predict(uniqueForecastDates)
+    thisSubPred['ds'] = thisSubPred['ds'].astype(str)
+    totalPred[storeName] = thisSubPred[['yhat']]
+    print(loopNo)
+    loopNo = loopNo + 1
+    
+totalPred = pd.melt(totalPred)
+totalPred = totalPred.rename(columns={'variable': 'air_store_id', 'value': 'y'})
+totalPred['ds'] = allNameDates['ds']
+totalPred.y.loc[totalPred['y'] < 0] = 0
+storeSubTable = subTable.merge(totalPred, on=['ds', 'air_store_id'])
+storeSubTable['air_store_id'] = storeSubTable[['air_store_id', 'ds']].\
+                                apply(lambda x: '_'.join(x), axis=1)
+storeSubTable.drop(['visitors','ds'], axis=1, inplace=True)
+storeSubTable.columns = ['id', 'visitors']
+storeSubTable.to_csv('submissions/storeFbProphet.csv', index=False)
+
+# %%
+# FBProphet - Average over genres
 prophetData = pd.concat([air_visit_data[['visit_date', 'visitors']],
                          air_store_info[['air_genre_name']]], axis=1)
 newProphet = prophetData.groupby(['air_genre_name', 'visit_date'], axis=0)\
                                                     .mean().reset_index()
 
 uniqueGenres = newProphet.air_genre_name.unique().astype(str)
-allGenreDates = pd.DataFrame(list(product(uniqueGenres,uniqueForecastDates['ds'])),
-                             columns=['genres', 'ds'])
+
 errorSeparate = []
 noTrainingPoints = []
 totalPred = pd.DataFrame()
@@ -216,9 +220,11 @@ genreSubTable.to_csv('submissions/genreFbProphet.csv', index=False)
 # *Just make a prediction based on all of the data and submit data to kaggle
 #  to find out the score
 
+# Is the data definitely being taken correctly here?
+
 # %%
-# Cluster data geographically and then train - distances are close so lets just
-# use k-means rather than DBSCAN or something that works better on the globe.
+# Cluster data geographically and then train - distances are close so
+# use k-means rather than DBSCAN.
 
 prophetData = pd.merge(air_visit_data,
                        air_store_info[['air_store_id',
@@ -260,6 +266,31 @@ for cluster in uniqueClusters:
 
 print("Error when trained using separate clusters is {:.1f}"
       .format(np.mean(errorClusters)))
+
+# %%
+# Extract info from dates
+# First, define a little function to extract year, month, day, hour
+
+
+def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
+                  prefix=None):
+    """Extract the year, month, day, weekday and hour from the data for use as
+    features"""
+    if not prefix:
+        prefix = target_var
+    pd_df[target_var] = pd.to_datetime(pd_df[target_var], format=format_str)
+    pd_df['{0}_year'.format(prefix)] = pd.DatetimeIndex(
+            pd_df[target_var]).year
+    pd_df['{0}_month'.format(prefix)] = pd.DatetimeIndex(
+            pd_df[target_var]).month
+    pd_df['{0}_day'.format(prefix)] = pd.DatetimeIndex(
+            pd_df[target_var]).day
+    pd_df['{0}_weekday'.format(prefix)] = pd.DatetimeIndex(
+            pd_df[target_var]).weekday
+    pd_df['{0}_hour'.format(prefix)] = pd.DatetimeIndex(
+            pd_df[target_var]).hour
+    pd_df.drop(target_var, inplace=True, axis=1)
+    return pd_df
 
 
 # %%
@@ -384,11 +415,6 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     main_tbl_merge.to_csv('output/main_tbl.csv')
     return 0
 
-
-# SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
-#                 hpg_reserve, hpg_store_info, date_info,
-#                 sample_submission, store_id_relation)
-
 # %% Plotting
 
 
@@ -475,5 +501,8 @@ def SGDFit():
     SGD_sub.to_csv('submissions/SGD.csv', index=False)
     Xsub.pivot_table(columns='holiday_flg')
 
-
+# SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
+#                 hpg_reserve, hpg_store_info, date_info,
+#                 sample_submission, store_id_relation)
+    
 # SGDFit()
