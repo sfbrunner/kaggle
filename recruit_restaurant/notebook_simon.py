@@ -46,6 +46,7 @@ from sklearn.linear_model import SGDRegressor
 from sklearn.model_selection import cross_val_score, GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from itertools import product
 # Suppress all futurewarnings in console
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -162,9 +163,12 @@ prophetData = pd.concat([air_visit_data[['visit_date', 'visitors']],
 newProphet = prophetData.groupby(['air_genre_name', 'visit_date'], axis=0)\
                                                     .mean().reset_index()
 
-uniqueGenres = newProphet.air_genre_name.unique()
+uniqueGenres = newProphet.air_genre_name.unique().astype(str)
+allGenreDates = pd.DataFrame(list(product(uniqueGenres,uniqueForecastDates['ds'])),
+                             columns=['genres', 'ds'])
 errorSeparate = []
 noTrainingPoints = []
+totalPred = pd.DataFrame()
 for genre in uniqueGenres:
     m = Prophet(holidays=holidays)
     thisProphet = newProphet.loc[newProphet['air_genre_name'] == genre]
@@ -183,8 +187,24 @@ for genre in uniqueGenres:
     forecast = m.predict(pd.DataFrame(prophetTest['ds']))
     errorSeparate.append(mean_squared_error(prophetTest['y'],
                                             forecast['yhat']))
-    # m.plot(forecast)
-    # m.plot_components(forecast);
+    thisSubPred = m.predict(uniqueForecastDates)
+    thisSubPred['ds'] = thisSubData['ds'].astype(str)
+    totalPred[genre] = thisSubData[['yhat']]
+
+totalPred = pd.melt(totalPred)
+totalPred = totalPred.rename(columns={'variable': 'genres', 'value': 'y'})
+totalPred['ds'] = allGenreDates['ds']
+
+genreSubTable = subTable.merge(air_store_info[['air_store_id','air_genre_name']],
+                               on='air_store_id')
+genreSubTable = genreSubTable.merge(totalPred, left_on=['air_genre_name','ds'],
+                                    right_on=['genres','ds'])
+genreSubTable['air_store_id'] = genreSubTable[['air_store_id', 'ds']].\
+                                apply(lambda x: '_'.join(x), axis=1)
+genreSubTable.drop(['visitors','ds','air_genre_name','genres'], 
+                   axis=1,inplace=True)
+genreSubTable.columns = ['id', 'visitors']
+genreSubTable.to_csv('submissions/genreFbProphet.csv', index=False)
 
 print("Error when trained using genres separately is {:.1f}"
       .format(np.mean(errorSeparate)))
@@ -196,8 +216,6 @@ print("Error when trained using genres separately is {:.1f}"
 # It's not fair to fill NaNs and then split - the predictions will then
 # be great when there are very few data points. Not really any way to get
 # around this however, because some genres just don't have enough data points.
-# *Remove restaurants not in the submission data (perhaps we don't even need
-#   to make predictions on the training data with very few points)
 
 # %%
 # Cluster data geographically and then train - distances are close so lets just
@@ -368,9 +386,9 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     return 0
 
 
-SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
-                 hpg_reserve, hpg_store_info, date_info,
-                 sample_submission, store_id_relation)
+# SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
+#                 hpg_reserve, hpg_store_info, date_info,
+#                 sample_submission, store_id_relation)
 
 # %% Plotting
 
@@ -459,4 +477,4 @@ def SGDFit():
     Xsub.pivot_table(columns='holiday_flg')
 
 
-SGDFit()
+# SGDFit()
