@@ -63,9 +63,6 @@ date_info = pd.read_csv('input/date_info.csv')
 sample_submission = pd.read_csv('input/sample_submission.csv')
 store_id_relation = pd.read_csv('input/store_id_relation.csv')
 
-# %% 
-# Prepare data for submission
-
 
 def prepareFBProphetSubmission(sample_submission):
     """ Prepare a submission table for use in fbprophet predictions """
@@ -75,153 +72,158 @@ def prepareFBProphetSubmission(sample_submission):
     subTable['id2'], subTable['ds'] = subTable['id2'].str.split('_', 1).str
     subTable['air_store_id'] = subTable[['id1', 'id2']]\
                                 .apply(lambda x: '_'.join(x), axis=1)
-    subTable.drop(['id', 'id1', 'id2'], inplace=True, axis=1)
+    subTable.drop(['id', 'id1', 'id2'], inplace=True, axis=1)    
 
     return subTable
 
 
-subTable = prepareFBProphetSubmission(sample_submission)
+def dates(date_info, air_visit_data, subTable):
+    """ Return a dataframe of holidays """
+
+    holidays = date_info.loc[date_info['holiday_flg'] == 1]
+    holidays = holidays[['calendar_date']]
+    holidays.columns = ['ds']
+    holidays['holiday'] = 'Holiday'
+
+    trainDays = pd.DataFrame(air_visit_data.visit_date.unique(), columns=['ds'])
+    trainDays = trainDays.sort_values('ds')
+    forecastDays = pd.DataFrame(subTable.ds.unique(), columns=['ds'])
+
+    return holidays, trainDays, forecastDays
 
 
-# %%
-# Fbprophet - Average over all restaurants
+def avgFBProphet(air_visit_data, subTable, forecastDays, holidays):
+    """ FBProphet run using a sum off all visits on each date """
 
-# def timeSeriesPreprocessing(air_visit_data):
-#    """ Preprocessing of data for fbprophet time-series modelling """
+    prophetData = air_visit_data[['visit_date', 'visitors']]
+    prophetData.columns = ['ds', 'y']
+    newProphet = prophetData.groupby(['ds'], axis=0).mean().reset_index()
+    m = Prophet(holidays=holidays)
+    m.fit(newProphet)
+    subForecast = m.predict(forecastDays)
+    subForecast['ds'] = subForecast['ds'].astype(str)
 
-prophetData = air_visit_data[['visit_date', 'visitors']]
-allDays = pd.date_range(prophetData.visit_date.min(),
-                        prophetData.visit_date.max())
-holidays = date_info.loc[date_info['holiday_flg'] == 1]
-holidays = holidays[['calendar_date']]
-holidays.columns = ['ds']
-holidays['holiday'] = 'Holiday'
+    avgSubTable = subTable.merge(subForecast[['ds', 'yhat']], on='ds')
+    avgSubTable['air_store_id'] = avgSubTable[['air_store_id', 'ds']].\
+                                    apply(lambda x: '_'.join(x), axis=1)
+    avgSubTable.drop(['visitors', 'ds'], inplace=True, axis=1)
+    avgSubTable.columns = ['id', 'visitors']
+    avgSubTable.to_csv('submissions/avgFbProphet.csv', index=False)
 
-prophetData.columns = ['ds', 'y']
-newProphet = prophetData.groupby(['ds'], axis=0).mean().reset_index()
-prophetTrain, prophetTest = train_test_split(newProphet, test_size=0.25,
-                                             random_state=42)
-m = Prophet(holidays=holidays)
-m.fit(prophetTrain)
-testForecast = m.predict(prophetTest[['ds']])
-
-errorBulk = mean_squared_error(prophetTest['y'], testForecast['yhat'])
-print("Error when trained in bulk is {:.1f}".format(errorBulk))
-# Would mean absolute error be a better metric?
-
-uniqueForecastDates = pd.DataFrame(
-        subTable.ds.unique().astype(str), columns=['ds'])
-subForecast = m.predict(uniqueForecastDates)
-subForecast['ds'] = subForecast['ds'].astype(str)
-
-avgSubTable = subTable.merge(subForecast[['ds', 'yhat']], on='ds')
-avgSubTable['air_store_id'] = avgSubTable[['air_store_id', 'ds']].\
-                                apply(lambda x: '_'.join(x), axis=1)
-avgSubTable.drop(['visitors', 'ds'], inplace=True, axis=1)
-avgSubTable.columns = ['id', 'visitors']
-avgSubTable.to_csv('submissions/avgFbProphet.csv', index=False)
+    return avgSubTable
 
 
 # %%
 # FBProphet - Predict each name separately 
 
-prophetData = air_visit_data
+def nameFBProphet(air_visit_data, forecastDays, holidays, trainDays):
+    """ FBProphet run for each restaurant separately """
+    prophetData = air_visit_data
+    uniqueNames = prophetData.air_store_id.unique()
+    allNameDates = pd.DataFrame(list(product(uniqueNames,forecastDays['ds'])),
+                                columns=['genres', 'ds'])
 
-uniqueNames = prophetData.air_store_id.unique()
-allNameDates = pd.DataFrame(list(product(uniqueNames,uniqueForecastDates['ds'])),
-                             columns=['genres', 'ds'])
-# forecastDates = 
-totalPred = pd.DataFrame()
-loopNo=0
+    totalPred = pd.DataFrame()
+    loopNo=0
 
-for storeName in uniqueNames:
-    m = Prophet(holidays=holidays)
-    thisProphet = prophetData[prophetData['air_store_id']==storeName]
-    thisProphet.drop(['air_store_id'], inplace=True, axis=1)
-    thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
-    thisProphet = thisProphet.set_index('visit_date')
-    thisProphet = thisProphet.reindex(allDays).fillna(
-            thisProphet.visitors.mean()).reset_index()
-    thisProphet.columns = ['ds','y']
-    m.fit(thisProphet)
-    thisSubPred = m.predict(uniqueForecastDates)
-    thisSubPred['ds'] = thisSubPred['ds'].astype(str)
-    totalPred[storeName] = thisSubPred[['yhat']]
-    print(loopNo)
-    loopNo = loopNo + 1
-    
-totalPred = pd.melt(totalPred)
-totalPred = totalPred.rename(columns={'variable': 'air_store_id', 'value': 'y'})
-totalPred['ds'] = allNameDates['ds']
-totalPred.y.loc[totalPred['y'] < 0] = 0
-storeSubTable = subTable.merge(totalPred, on=['ds', 'air_store_id'])
-storeSubTable['air_store_id'] = storeSubTable[['air_store_id', 'ds']].\
-                                apply(lambda x: '_'.join(x), axis=1)
-storeSubTable.drop(['visitors','ds'], axis=1, inplace=True)
-storeSubTable.columns = ['id', 'visitors']
-storeSubTable.to_csv('submissions/storeFbProphet.csv', index=False)
-
-# %%
-# FBProphet - Average over genres
-prophetData = pd.concat([air_visit_data[['visit_date', 'visitors']],
-                         air_store_info[['air_genre_name']]], axis=1)
-newProphet = prophetData.groupby(['air_genre_name', 'visit_date'], axis=0)\
-                                                    .mean().reset_index()
-
-uniqueGenres = newProphet.air_genre_name.unique().astype(str)
-
-errorSeparate = []
-noTrainingPoints = []
-totalPred = pd.DataFrame()
-# Predict the average if there are too few training points. 
-minNoTrainingPoints = 20 
-for genre in uniqueGenres:
-    m = Prophet(holidays=holidays)
-    thisProphet = newProphet.loc[newProphet['air_genre_name'] == genre]
-    thisProphet = thisProphet.drop(['air_genre_name'], axis=1)
-    thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
-    thisProphet = thisProphet.set_index('visit_date')
-    noTrainingPoints.append(len(thisProphet))
-    if len(thisProphet) < minNoTrainingPoints:
-        thisProphet = thisProphet.reindex(allDays).fillna(
+    for storeName in uniqueNames:
+        m = Prophet(holidays=holidays)
+        thisProphet = prophetData[prophetData['air_store_id']==storeName]
+        thisProphet.drop(['air_store_id'], inplace=True, axis=1)
+        thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
+        thisProphet = thisProphet.set_index('visit_date')
+        thisProphet = thisProphet.reindex(trainDays['ds']).fillna(
                 thisProphet.visitors.mean()).reset_index()
-    else:
-        thisProphet = thisProphet.reindex(allDays).reset_index()
-    thisProphet.columns = ['ds', 'y']
+        thisProphet.columns = ['ds','y']
+        m.fit(thisProphet)
+        
+        thisSubPred = m.predict(forecastDays)
+        thisSubPred['ds'] = thisSubPred['ds'].astype(str)
+        totalPred[storeName] = thisSubPred[['yhat']]
+        print(str(loopNo)+" ", end='')
+        loopNo = loopNo + 1
+    
+    totalPred = pd.melt(totalPred)
+    totalPred = totalPred.rename(columns={'variable': 'air_store_id', 'value': 'y'})
+    totalPred['ds'] = allNameDates['ds']
+    totalPred.y.loc[totalPred['y'] < 0] = 0
+    storeSubTable = subTable.merge(totalPred, on=['ds', 'air_store_id'])
+    storeSubTable['air_store_id'] = storeSubTable[['air_store_id', 'ds']].\
+                                    apply(lambda x: '_'.join(x), axis=1)
+    storeSubTable.drop(['visitors','ds'], axis=1, inplace=True)
+    storeSubTable.columns = ['id', 'visitors']
+    storeSubTable.to_csv('submissions/storeFbProphet.csv', index=False)
+    
+    return storeSubTable
 
-    m.fit(thisProphet)
-    thisSubPred = m.predict(uniqueForecastDates)
-    # m.plot(thisSubPred)
-    thisSubPred['ds'] = thisSubPred['ds'].astype(str)
-    totalPred[genre] = thisSubPred[['yhat']]
 
-totalPred = pd.melt(totalPred)
-totalPred = totalPred.rename(columns={'variable': 'genres', 'value': 'y'})
-totalPred['ds'] = allGenreDates['ds']
-totalPred.y.loc[totalPred['y'] < 0] = 0
-genreSubTable = subTable.merge(air_store_info[['air_store_id','air_genre_name']],
-                               on='air_store_id')
-genreSubTable = genreSubTable.merge(totalPred, left_on=['air_genre_name','ds'],
-                                    right_on=['genres','ds'])
-genreSubTable['air_store_id'] = genreSubTable[['air_store_id', 'ds']].\
-                                apply(lambda x: '_'.join(x), axis=1)
-genreSubTable.drop(['visitors','ds','air_genre_name','genres'], 
-                   axis=1, inplace=True)
-genreSubTable.columns = ['id', 'visitors']
-genreSubTable.to_csv('submissions/genreFbProphet.csv', index=False)
+def genreFBProphet (air_visit_data, air_store_info, holidays, trainDays, 
+                    forecastDays):
+    """ FBProphet run for each genre separately """
 
-# Note: Some of these have so little data that predictions are completely off.
-# This is especially significant if we use area rather than genre. Can we
-# cluster the restaurants somehow and train each cluster separately?
+    prophetData = pd.concat([air_visit_data[['visit_date', 'visitors']],
+                             air_store_info[['air_genre_name']]], axis=1)
+    newProphet = prophetData.groupby(['air_genre_name', 'visit_date'], axis=0)\
+                                                        .mean().reset_index()
 
-# It's not fair to fill NaNs and then split - the predictions will then
-# be great when there are very few data points. Not really any way to get
-# around this however, because some genres just don't have enough data points.
-# *Just make a prediction based on all of the data and submit data to kaggle
-#  to find out the score
+    uniqueGenres = newProphet.air_genre_name.unique().astype(str)
+    allGenreDates = pd.DataFrame(list(product(uniqueGenres,forecastDays['ds'])),
+                                columns=['genres', 'ds'])
 
-# Is the data definitely being taken correctly here?
+    errorSeparate = []
+    totalPred = pd.DataFrame()
+    # Predict from 0 if there are too few training points. 
+    minNoTrainingPoints = 20 
+    for genre in uniqueGenres:
+        m = Prophet(holidays=holidays)
+        thisProphet = newProphet.loc[newProphet['air_genre_name'] == genre]
+        thisProphet = thisProphet.drop(['air_genre_name'], axis=1)
+        thisProphet = thisProphet.set_index('visit_date')
+        if len(thisProphet) < minNoTrainingPoints:
+            thisProphet = thisProphet.reindex(trainDays['ds']).fillna(0).reset_index()
+        else:
+            thisProphet = thisProphet.reindex(trainDays['ds']).reset_index()
+        thisProphet.columns = ['ds', 'y']
+    
+        m.fit(thisProphet)
+        thisSubPred = m.predict(forecastDays)
+        thisSubPred['ds'] = thisSubPred['ds'].astype(str)
+        totalPred[genre] = thisSubPred[['yhat']]
+    
+    totalPred = pd.melt(totalPred)
+    totalPred = totalPred.rename(columns={'variable': 'genres', 'value': 'y'})
+    totalPred['ds'] = allGenreDates['ds']
+    totalPred.y.loc[totalPred['y'] < 0] = 0
+    genreSubTable = subTable.merge(air_store_info[['air_store_id','air_genre_name']],
+                                   on='air_store_id')
+    genreSubTable = genreSubTable.merge(totalPred, left_on=['air_genre_name','ds'],
+                                        right_on=['genres','ds'])
+    genreSubTable['air_store_id'] = genreSubTable[['air_store_id', 'ds']].\
+                                    apply(lambda x: '_'.join(x), axis=1)
+    genreSubTable.drop(['visitors','ds','air_genre_name','genres'], 
+                       axis=1, inplace=True)
+    genreSubTable.columns = ['id', 'visitors']
+    genreSubTable.to_csv('submissions/genreFbProphet.csv', index=False)
+    
+    return genreSubTable
+    # Note: Some of these have so little data that predictions are completely off.
+    # This is especially significant if we use area rather than genre. Can we
+    # cluster the restaurants somehow and train each cluster separately?
 
+    # It's not fair to fill NaNs and then split - the predictions will then
+    # be great when there are very few data points. Not really any way to get
+    # around this however, because some genres just don't have enough data points.
+    # *Just make a prediction based on all of the data and submit data to kaggle
+    #  to find out the score
+
+    # Is the data definitely being taken correctly here?
+
+subTable = prepareFBProphetSubmission(sample_submission)
+holidays, trainDays, forecastDays = dates(date_info, air_visit_data, subTable)
+# avgSubTable = avgFBProphet(air_visit_data, subTable, forecastDays, holidays)
+#storeSubTable = nameFBProphet(air_visit_data, forecastDays, holidays, trainDays)
+genreSubTable = genreFBProphet(air_visit_data, air_store_info, holidays,
+                               trainDays, forecastDays)
 # %%
 # Cluster data geographically and then train - distances are close so
 # use k-means rather than DBSCAN.
@@ -251,7 +253,7 @@ for cluster in uniqueClusters:
     thisProphet = thisProphet.drop(['clusterNo'], axis=1)
     thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
     thisProphet = thisProphet.set_index('visit_date')
-    thisProphet = thisProphet.reindex(allDays).fillna(thisProphet.visitors.
+    thisProphet = thisProphet.reindex(trainDays).fillna(thisProphet.visitors.
                                                       mean()).reset_index()
     thisProphet.columns = ['ds', 'y']
     prophetTrain, prophetTest = train_test_split(thisProphet, test_size=0.15,
