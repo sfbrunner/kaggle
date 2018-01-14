@@ -286,10 +286,6 @@ def clusterFBProphet(air_visit_data, air_store_info, subTable, forecastDays):
 # clusterSubTable = clusterFBProphet(air_visit_data, air_store_info, subTable,
 #                                    forecastDays)
 
-# %%
-# Extract info from dates
-# First, define a little function to extract year, month, day, hour
-
 
 def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
                   prefix=None):
@@ -312,9 +308,6 @@ def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
     return pd_df
 
 
-# %%
-
-
 def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                      hpg_store_info, date_info, sample_submission,
                      store_id_relation):
@@ -333,7 +326,7 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     future['test'] = 1
     future['visitors'] = 0
     mainTable = air_visit_data.append(future, ignore_index=True)
-
+    
     # Add air reservation data to table, filling NaNs with zero
     air_reserve['visit_date'] = air_reserve['visit_datetime'].apply(
                                                             lambda x: x[:10])
@@ -344,7 +337,26 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     mainTable = mainTable.merge(air_reserve, how='left',
                                 on=['air_store_id', 'visit_date'])
     mainTable['reserve_visitors'] = mainTable['reserve_visitors'].fillna(0)
-
+    
+    # Add hpg reservation data to table, filling NaNs with zero
+    
+    hpg_reserve = hpg_reserve.merge(store_id_relation, how='left',
+                                    on='hpg_store_id')
+    hpg_reserve = hpg_reserve.dropna()
+    hpg_reserve['visit_date'] = hpg_reserve['visit_datetime'].apply(
+                                                            lambda x: x[:10])
+    hpg_reserve.drop(['reserve_datetime', 'visit_datetime', 'hpg_store_id'],
+                     axis=1, inplace=True)
+    hpg_reserve = hpg_reserve.groupby(['air_store_id', 'visit_date'], axis=0)\
+                                       .sum().reset_index()
+    hpg_reserve.columns = ['air_store_id', 'visit_date', 'hpg_res_visitors']
+    mainTable = mainTable.merge(hpg_reserve, how='left',
+                                on=['air_store_id', 'visit_date'])
+    mainTable['hpg_res_visitors'] = mainTable['hpg_res_visitors'].fillna(0)
+    mainTable['reserve_visitors'] = mainTable['reserve_visitors']+\
+                                    mainTable['hpg_res_visitors']
+    mainTable.drop(['hpg_res_visitors'], axis=1, inplace=True)
+    
     # Get mean visitor numbers for train data and prepare baseline submission
     visitorsMean = mainTable.loc[mainTable['test'] == 0].visitors.mean()
     baselineSub = mainTable
@@ -427,10 +439,12 @@ def SGDFit():
     SGD_sub = pd.read_csv('submissions/baseline.csv')
     SGD_sub.visitors = pipe.predict(Xsub[target_cols_fit])
     SGD_sub.to_csv('submissions/SGD.csv', index=False)
+    
+    return SGD_sub
 
 
 SGDTable = SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
                             hpg_reserve, hpg_store_info, date_info,
                             sample_submission, store_id_relation)
 
-SGDFit()
+SGD_sub = SGDFit()
