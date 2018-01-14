@@ -129,12 +129,12 @@ def nameFBProphet(air_visit_data, forecastDays, holidays, trainDays):
         thisProphet.drop(['air_store_id'], inplace=True, axis=1)
         thisProphet['visit_date'] = pd.to_datetime(thisProphet['visit_date'])
         thisProphet = thisProphet.set_index('visit_date')
-        thisProphet = thisProphet.reindex(trainDays['ds']).fillna(
-                thisProphet.visitors.mean()).reset_index()
+        thisProphet = thisProphet.reindex(trainDays['ds'])
+        thisProphet = thisProphet.fillna(0).reset_index()
         thisProphet.columns = ['ds', 'y']
         m.fit(thisProphet)
-
         thisSubPred = m.predict(forecastDays)
+        m.plot(thisSubPred)
         thisSubPred['ds'] = thisSubPred['ds'].astype(str)
         totalPred[storeName] = thisSubPred[['yhat']]
         print(str(loopNo)+" ", end='')
@@ -256,7 +256,6 @@ def clusterFBProphet(air_visit_data, air_store_info, subTable, forecastDays):
 
         m.fit(thisProphet)
         thisSubPred = m.predict(forecastDays)
-        m.plot(thisSubPred)
         thisSubPred['ds'] = thisSubPred['ds'].astype(str)
         totalPred[cluster] = thisSubPred[['yhat']]
 
@@ -278,14 +277,14 @@ def clusterFBProphet(air_visit_data, air_store_info, subTable, forecastDays):
     return clusterSubTable
 
 
-subTable = prepareFBProphetSubmission(sample_submission)
-holidays, trainDays, forecastDays = dates(date_info, air_visit_data, subTable)
+# subTable = prepareFBProphetSubmission(sample_submission)
+# holidays, trainDays, forecastDays = dates(date_info, air_visit_data, subTable)
 # avgSubTable = avgFBProphet(air_visit_data, subTable, forecastDays, holidays)
 # storeSubTable = nameFBProphet(air_visit_data, forecastDays, holidays, trainDays)
 # genreSubTable = genreFBProphet(air_visit_data, air_store_info, holidays,
 #                                trainDays, forecastDays)
-clusterSubTable = clusterFBProphet(air_visit_data, air_store_info, subTable,
-                                   forecastDays)
+# clusterSubTable = clusterFBProphet(air_visit_data, air_store_info, subTable,
+#                                    forecastDays)
 
 # %%
 # Extract info from dates
@@ -320,130 +319,66 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                      hpg_store_info, date_info, sample_submission,
                      store_id_relation):
     """ Preprocessing of data for stochastic gradient descent modelling """
-
-    hpg_reserve = extract_dates(pd_df=hpg_reserve,
-                                target_var='visit_datetime', prefix='target')
-    hpg_reserve = extract_dates(pd_df=hpg_reserve,
-                                target_var='reserve_datetime')
-    hpg_reserve.head()
-    air_reserve = extract_dates(pd_df=air_reserve,
-                                target_var='visit_datetime', prefix='target')
-    air_reserve = extract_dates(pd_df=air_reserve,
-                                target_var='reserve_datetime')
-    air_reserve.pivot_table(columns='reserve_datetime_weekday')
-
-    date_info = extract_dates(pd_df=date_info, target_var='calendar_date',
-                              format_str="%Y-%m-%d", prefix='date')
-    date_info.drop('date_hour', inplace=True, axis=1)
-    date_info.pivot_table(columns='day_of_week')
-
-    air_visit_data = extract_dates(pd_df=air_visit_data,
-                                   target_var='visit_date',
-                                   format_str="%Y-%m-%d", prefix='target')
-    air_visit_data.drop('target_hour', axis=1, inplace=True)
-    air_visit_data['id'] = 0
+    # Join real data with data to predict into one dataframe, with a 'test'
+    # label to define if training or test data.
     air_visit_data['test'] = 0
-    air_visit_data['store_type'] = 'air'
-    air_visit_data.head()
+    future = sample_submission.join(sample_submission['id'].str.split('_', 1,
+                                    expand=True).rename(
+                                    columns={0: 'id1', 1: 'id2'}))
+    future['id2'], future['visit_date'] = future['id2'].str.split('_', 1).str
+    future['air_store_id'] = future[['id1', 'id2']].apply(
+                                                    lambda x: '_'.join(x),
+                                                    axis=1)
+    future.drop(['id', 'id1', 'id2'], inplace=True, axis=1)
+    future['test'] = 1
+    future['visitors'] = 0
+    mainTable = air_visit_data.append(future, ignore_index=True)
 
-    # %%
-    # Extract dates and location from submission table
-    # First, split up id column
+    # Add air reservation data to table, filling NaNs with zero
+    air_reserve['visit_date'] = air_reserve['visit_datetime'].apply(
+                                                            lambda x: x[:10])
+    air_reserve.drop(['reserve_datetime', 'visit_datetime'], axis=1,
+                     inplace=True)
+    air_reserve = air_reserve.groupby(['air_store_id', 'visit_date'], axis=0)\
+                                       .sum().reset_index()
+    mainTable = mainTable.merge(air_reserve, how='left',
+                                on=['air_store_id', 'visit_date'])
+    mainTable['reserve_visitors'] = mainTable['reserve_visitors'].fillna(0)
 
-    x = sample_submission.join(sample_submission['id'].str.split('_', 1,
-                               expand=True).rename(
-                                       columns={0: 'id1', 1: 'id2'}))
-    x['id2'], x['date'] = x['id2'].str.split('_', 1).str
-    x['air_store_id'] = x[['id1', 'id2']].apply(lambda x: '_'.join(x), axis=1)
-    x.rename(columns={'id1': 'store_type'}, inplace=True)
-    x.drop('id2', inplace=True, axis=1)
-    x = extract_dates(pd_df=x, target_var='date', format_str="%Y-%m-%d",
-                      prefix='target')
-    x.drop('target_hour', inplace=True, axis=1)
-    x['test'] = 1
-    x.head()
-    sample_submission = x
-    sample_submission.head()
+    # Get mean visitor numbers for train data and prepare baseline submission
+    visitorsMean = mainTable.loc[mainTable['test'] == 0].visitors.mean()
+    baselineSub = mainTable
+    baselineSub['id'] = baselineSub['air_store_id'].map(str) +\
+                                                         "_" +\
+                                                    baselineSub['visit_date']
+    baselineSub = baselineSub.loc[mainTable['test'] == 1][['id', 'visitors']]
+    baselineSub.visitors = visitorsMean
+    baselineSub.to_csv('submissions/baseline.csv', index=False)
 
-    # %%
+    # Add features to main table
+    mainTable = pd.merge(mainTable, air_store_info, on='air_store_id')
+    date_info.columns = ['visit_date', 'day', 'holiday_flg']
+    mainTable = pd.merge(mainTable, date_info[['visit_date', 'holiday_flg']],
+                         on='visit_date')
+    mainTable = extract_dates(pd_df=mainTable,
+                              target_var='visit_date',
+                              format_str="%Y-%m-%d", prefix='target')
+    mainTable.drop('target_hour', inplace=True, axis=1)
 
-    sample_submission.pivot_table(columns='store_type')
+    # Save produced table to disk
+    mainTable.to_csv('output/main_tbl.csv')
 
-    # %%
-    # Constructing main table
-    # Concatenate edited submission table with air_visit_data
+    return mainTable
 
-    main_tbl = pd.concat([air_visit_data, sample_submission])
-    main_tbl.head()
-
-    # %%
-
-    main_tbl.pivot_table(columns='test')
-
-    # %%
-    # Get mean visitor numbers for train data
-    visitors_mean = main_tbl.loc[main_tbl['test'] == 0].visitors.mean()
-    baseline_sub = main_tbl.loc[main_tbl['test'] == 1][['id', 'visitors']]
-    baseline_sub.visitors = visitors_mean
-    baseline_sub.to_csv('submissions/baseline.csv', index=False)
-
-    # %%
-    # Merge with additional infos
-
-    # %%
-    # Merge with store info
-
-    air_store_info.head()
-
-    main_tbl_merge = pd.merge(main_tbl, air_store_info, on='air_store_id')
-    main_tbl_merge.head()
-
-    main_tbl_merge.describe()
-
-    # %%
-    # Merge with holiday info.
-
-    date_info_merge = date_info
-    date_info_merge['date_id'] = date_info_merge[['date_year',
-                                                  'date_month', 'date_day']].\
-                                                   astype(str).\
-                                                   apply(lambda x: '_'.
-                                                         join((x)), axis=1)
-    date_info_merge = date_info_merge[['holiday_flg', 'date_id']]
-    date_info_merge.head()
-
-    # %%
-
-    main_tbl_merge2 = main_tbl_merge
-    main_tbl_merge2['date_id'] = main_tbl_merge2[['target_year',
-                                                  'target_month', 'target_day']].\
-                                                   astype(str).\
-                                                   apply(lambda x: '_'.
-                                                         join((x)), axis=1)
-
-    main_tbl_merge2.head()
-
-    # %%
-
-    main_tbl_merge = pd.merge(left=main_tbl_merge2, right=date_info_merge,
-                              on='date_id')
-    main_tbl_merge.describe()
-
-    # %%
-    # Save current stage to disk
-
-    main_tbl_merge.to_csv('output/main_tbl.csv')
-    return 0
 
 # %% Plotting
-
 
 def plot_corr(size=8):
     """ Plot the correlation between features"""
     model_data = pd.read_csv('output/main_tbl.csv')
     target_cols = ['target_day', 'target_month', 'target_weekday',
                    'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'test', 'visitors']
+                   'reserve_visitors', 'test', 'visitors']
     X = model_data[target_cols]
 
     font = {'size': 16}
@@ -470,59 +405,32 @@ def SGDFit():
     model_data = pd.read_csv('output/main_tbl.csv')
     target_cols = ['target_day', 'target_month', 'target_weekday',
                    'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'test', 'visitors']
+                   'reserve_visitors', 'test', 'visitors']
     X = model_data[target_cols]
     target_cols_fit = [col for col in X.columns if col not in ['test',
                                                                'visitors']]
     Xsub = X[X['test'] == 1]
-    X = X[X['test'] == 0]
-
     Xsub = Xsub.drop(['test'], axis=1)
+    X = X[X['test'] == 0]
     X = X.drop(['test'], axis=1)
 
-    mod = SGDRegressor()
-
     pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', mod)])
-
-    X_train, X_test, y_train, y_test = train_test_split(X[target_cols_fit],
-                                                        X['visitors'],
-                                                        test_size=0.15,
-                                                        random_state=42)
-
+                     ('clf', SGDRegressor())])
     parameters = {'clf__alpha': np.logspace(-4, 1, 6)}
     pipe = GridSearchCV(pipe, parameters)
-
-    pipe.fit(X_train, y_train)
+    pipe.fit(X[target_cols_fit], X['visitors'])
     print(pipe.best_params_)
 
-    # Create a table of real vs predicted
-    testIndices = X_test.index.values
-    prediction = pd.Series(pipe.predict(X_test), name='Prediction',
-                           index=testIndices)
-    y_test.name = 'Real'
-    # resultsvsPredictions = pd.concat([prediction, y_test], axis=1)
-
-    scores = cross_val_score(pipe, X_test, y_test,
-                             scoring='neg_mean_squared_error')
-    # scores = mean_squared_error(y_test,prediction)
-    scores_base = cross_val_score(pipe, X_test,
-                                  pd.Series(
-                                          np.ones(len(y_test))*y_test.mean()))
-
-    print("Trained mean squared error is {:.1f} and untrained is {:.1f}"
-          .format(np.abs(scores.mean()), np.abs(scores_base.mean())))
-
-    # Do predictions for submission
+    # Predictions for submission
 
     Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
     SGD_sub = pd.read_csv('submissions/baseline.csv')
     SGD_sub.visitors = pipe.predict(Xsub[target_cols_fit])
     SGD_sub.to_csv('submissions/SGD.csv', index=False)
-    Xsub.pivot_table(columns='holiday_flg')
 
-# SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
-#                 hpg_reserve, hpg_store_info, date_info,
-#                 sample_submission, store_id_relation)
-    
-# SGDFit()
+
+SGDTable = SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
+                            hpg_reserve, hpg_store_info, date_info,
+                            sample_submission, store_id_relation)
+
+SGDFit()
