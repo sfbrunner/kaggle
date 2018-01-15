@@ -42,6 +42,7 @@ from sklearn.cluster import KMeans
 import numpy as np
 import logging
 from sklearn.linear_model import SGDRegressor
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.model_selection import cross_val_score, GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
@@ -413,7 +414,7 @@ def plot_corr(size=8):
 
 
 def SGDFit():
-    """ Fit with a stochastic gradient descent classifier """
+    """ Fit using stochastic gradient descent """
     model_data = pd.read_csv('output/main_tbl.csv')
     target_cols = ['target_day', 'target_month', 'target_weekday',
                    'target_year', 'latitude', 'longitude', 'holiday_flg',
@@ -442,9 +443,41 @@ def SGDFit():
     
     return SGD_sub
 
+def ensembleFit():
+    """ Fit using gradient boosted regression """
+    model_data = pd.read_csv('output/main_tbl.csv')
+    target_cols = ['target_day', 'target_month', 'target_weekday',
+                   'target_year', 'latitude', 'longitude', 'holiday_flg',
+                   'reserve_visitors', 'test', 'visitors']
+    X = model_data[target_cols]
+    target_cols_fit = [col for col in X.columns if col not in ['test',
+                                                               'visitors']]
+    Xsub = X[X['test'] == 1]
+    Xsub = Xsub.drop(['test'], axis=1)
+    X = X[X['test'] == 0]
+    X = X.drop(['test'], axis=1)
+
+    pipe = Pipeline([('scal', StandardScaler()),
+                     ('clf', GradientBoostingRegressor(verbose=2))])
+    parameters = {'clf__max_depth': np.linspace(1, 6, 6),
+                  'clf__learning_rate': np.logspace(-3, 2, 6)}
+    pipe = GridSearchCV(pipe, parameters)
+    pipe.fit(X[target_cols_fit], X['visitors'])
+    print(pipe.best_params_)
+
+    # Predictions for submission
+
+    Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
+    ensembleSub = pd.read_csv('submissions/baseline.csv')
+    ensembleSub.visitors = pipe.predict(Xsub[target_cols_fit])
+    ensembleSub.to_csv('submissions/ensemble.csv', index=False)
+    
+    return ensembleSub
+
 
 SGDTable = SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
                             hpg_reserve, hpg_store_info, date_info,
                             sample_submission, store_id_relation)
 
-SGD_sub = SGDFit()
+# SGD_sub = SGDFit()
+ensembleSub = ensembleFit()
