@@ -40,8 +40,9 @@ from sklearn.linear_model import SGDRegressor
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import GridSearchCV
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_squared_log_error
 from itertools import product
 import xgboost as xgb
 # Suppress all futurewarnings in console
@@ -395,6 +396,13 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                                      columns={'visitors': 'median_visitors'})
     mainTable = pd.merge(mainTable, temp, how='left', 
                          on=['air_store_id', 'target_weekday'])
+    
+    # Use label encoder for restaurant name and genre
+    le = LabelEncoder()
+    for column in mainTable:
+        if column == 'air_genre_name' or column == 'air_area_name':
+            le.fit(mainTable[column])
+            mainTable[column]=le.transform(mainTable[column])
 
     mainTable['visitors'] = mainTable['visitors'].apply(lambda x: np.log1p(x))
 
@@ -503,7 +511,8 @@ def NNFit():
     model_data = pd.read_csv('output/main_tbl.csv')
     target_cols = ['target_day', 'target_month', 'target_weekday',
                    'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'reserve_visitors', 'test', 'visitors']
+                   'reserve_visitors', 'test', 'visitors', 'air_genre_name',
+                   'air_area_name']
     X = model_data[target_cols]
     target_cols_fit = [col for col in X.columns if col not in ['test',
                                                                'visitors']]
@@ -545,9 +554,10 @@ def XGBoost():
     
 
     pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', xgb.XGBRegressor())])
+                     ('clf', xgb.XGBRegressor(eval_metric='rmse'))])
     parameters = {'clf__max_depth': np.linspace(2, 8, 7).astype(int),
-                  'clf__learning_rate': np.logspace(-4, -1, 4)}
+                  'clf__learning_rate': np.logspace(-4, -1, 4),
+                  'clf__n_estimators': np.logspace(2, 6, 5).astype(int)}
     pipe = GridSearchCV(pipe, parameters)
     pipe.fit(X[target_cols_fit], X['visitors'])
     print(pipe.best_params_)
