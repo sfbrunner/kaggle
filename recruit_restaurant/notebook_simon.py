@@ -25,28 +25,25 @@
 # Latitude and logitude are highly correlated: can we combine to a single
 # feature?
 #
-# ## For the time-series modelling, how should we organise the data?
-# * Average over all restaurants
-# * Treat every restaurant separately
-# * Combine restaurants by genre
-# * Combine restaurants by geographical location (create clusters maybe)
-# * fbprophet allows a holiday flag to be added.
+# TODO: Add number of observations for each restaurant and day of week as a 
+# feature. Add genre and area names as feature. 
 
 # ## Loading modules
 
 import pandas as pd
 from fbprophet import Prophet
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
 from sklearn.cluster import KMeans
 import numpy as np
 import logging
 from sklearn.linear_model import SGDRegressor
 from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import cross_val_score, GridSearchCV
+from sklearn.neural_network import MLPRegressor
+from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from itertools import product
+import xgboost as xgb
 # Suppress all futurewarnings in console
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -114,7 +111,7 @@ def avgFBProphet(air_visit_data, subTable, forecastDays, holidays):
     return avgSubTable
 
 
-def nameFBProphet(air_visit_data, forecastDays, holidays, trainDays):
+def nameFBProphet(air_visit_data, forecastDays, holidays, trainDays, subTable):
     """ FBProphet run for each restaurant separately """
     prophetData = air_visit_data
     uniqueNames = prophetData.air_store_id.unique()
@@ -157,7 +154,7 @@ def nameFBProphet(air_visit_data, forecastDays, holidays, trainDays):
 
 
 def genreFBProphet(air_visit_data, air_store_info, holidays, trainDays,
-                   forecastDays):
+                   forecastDays, subTable):
     """ FBProphet run for each genre separately """
 
     prophetData = pd.concat([air_visit_data[['visit_date', 'visitors']],
@@ -215,7 +212,8 @@ def genreFBProphet(air_visit_data, air_store_info, holidays, trainDays,
     # points.
 
 
-def clusterFBProphet(air_visit_data, air_store_info, subTable, forecastDays):
+def clusterFBProphet(air_visit_data, air_store_info, subTable, holidays,
+                     trainDays, forecastDays):
     """ Cluster geographically by latitude and longitude then run FBProphet
     for each cluster separately. Distances are close so k-means is used rather
     than something like DBSCAN"""
@@ -327,7 +325,7 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     future['test'] = 1
     future['visitors'] = 0
     mainTable = air_visit_data.append(future, ignore_index=True)
-    
+
     # Add air reservation data to table, filling NaNs with zero
     air_reserve['visit_date'] = air_reserve['visit_datetime'].apply(
                                                             lambda x: x[:10])
@@ -338,9 +336,9 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     mainTable = mainTable.merge(air_reserve, how='left',
                                 on=['air_store_id', 'visit_date'])
     mainTable['reserve_visitors'] = mainTable['reserve_visitors'].fillna(0)
-    
+
     # Add hpg reservation data to table, filling NaNs with zero
-    
+
     hpg_reserve = hpg_reserve.merge(store_id_relation, how='left',
                                     on='hpg_store_id')
     hpg_reserve = hpg_reserve.dropna()
@@ -354,10 +352,10 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     mainTable = mainTable.merge(hpg_reserve, how='left',
                                 on=['air_store_id', 'visit_date'])
     mainTable['hpg_res_visitors'] = mainTable['hpg_res_visitors'].fillna(0)
-    mainTable['reserve_visitors'] = mainTable['reserve_visitors']+\
+    mainTable['reserve_visitors'] = mainTable['reserve_visitors'] +\
                                     mainTable['hpg_res_visitors']
     mainTable.drop(['hpg_res_visitors'], axis=1, inplace=True)
-    
+
     # Get mean visitor numbers for train data and prepare baseline submission
     visitorsMean = mainTable.loc[mainTable['test'] == 0].visitors.mean()
     baselineSub = mainTable
@@ -377,6 +375,28 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                               target_var='visit_date',
                               format_str="%Y-%m-%d", prefix='target')
     mainTable.drop('target_hour', inplace=True, axis=1)
+
+    # Add min, max and median visitors as a feature
+
+    temp = mainTable.groupby(['air_store_id', 'target_weekday'],
+                             as_index=False)['visitors'].min().rename(
+                                     columns={'visitors': 'min_visitors'})
+    mainTable = pd.merge(mainTable, temp, how='left', 
+                         on=['air_store_id', 'target_weekday'])
+    
+    temp = mainTable.groupby(['air_store_id', 'target_weekday'],
+                             as_index=False)['visitors'].max().rename(
+                                     columns={'visitors': 'max_visitors'})
+    mainTable = pd.merge(mainTable, temp, how='left', 
+                         on=['air_store_id', 'target_weekday'])
+    
+    temp = mainTable.groupby(['air_store_id', 'target_weekday'],
+                             as_index=False)['visitors'].median().rename(
+                                     columns={'visitors': 'median_visitors'})
+    mainTable = pd.merge(mainTable, temp, how='left', 
+                         on=['air_store_id', 'target_weekday'])
+
+    mainTable['visitors'] = mainTable['visitors'].apply(lambda x: np.log1p(x))
 
     # Save produced table to disk
     mainTable.to_csv('output/main_tbl.csv')
@@ -410,7 +430,7 @@ def plot_corr(size=8):
 # can we combine them into a single feature?
 
 # %%
-# ## First simple modelling attempt
+# ## Modelling attempts
 
 
 def SGDFit():
@@ -418,14 +438,17 @@ def SGDFit():
     model_data = pd.read_csv('output/main_tbl.csv')
     target_cols = ['target_day', 'target_month', 'target_weekday',
                    'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'reserve_visitors', 'test', 'visitors']
+                   'reserve_visitors', 'test', 'visitors', 'min_visitors',
+                   'max_visitors', 'median_visitors']
     X = model_data[target_cols]
+    
     target_cols_fit = [col for col in X.columns if col not in ['test',
                                                                'visitors']]
     Xsub = X[X['test'] == 1]
     Xsub = Xsub.drop(['test'], axis=1)
     X = X[X['test'] == 0]
     X = X.drop(['test'], axis=1)
+    
 
     pipe = Pipeline([('scal', StandardScaler()),
                      ('clf', SGDRegressor())])
@@ -435,10 +458,10 @@ def SGDFit():
     print(pipe.best_params_)
 
     # Predictions for submission
-
     Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
     SGD_sub = pd.read_csv('submissions/baseline.csv')
-    SGD_sub.visitors = pipe.predict(Xsub[target_cols_fit])
+    SGD_sub['visitors'] = pipe.predict(Xsub[target_cols_fit])
+    SGD_sub['visitors'] = SGD_sub['visitors'].apply(lambda x: np.expm1(x))
     SGD_sub.to_csv('submissions/SGD.csv', index=False)
     
     return SGD_sub
@@ -458,12 +481,13 @@ def ensembleFit():
     X = X.drop(['test'], axis=1)
 
     pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', GradientBoostingRegressor(verbose=2))])
+                     ('clf', GradientBoostingRegressor(verbose=1))])
     parameters = {'clf__max_depth': np.linspace(1, 6, 6),
                   'clf__learning_rate': np.logspace(-3, 2, 6)}
     pipe = GridSearchCV(pipe, parameters)
     pipe.fit(X[target_cols_fit], X['visitors'])
-    print(pipe.best_params_)
+    print(pipe.feature_importances_)
+    print(pipe.loss_)
 
     # Predictions for submission
 
@@ -474,10 +498,75 @@ def ensembleFit():
     
     return ensembleSub
 
+def NNFit():
+    """ Fit using a neural network """
+    model_data = pd.read_csv('output/main_tbl.csv')
+    target_cols = ['target_day', 'target_month', 'target_weekday',
+                   'target_year', 'latitude', 'longitude', 'holiday_flg',
+                   'reserve_visitors', 'test', 'visitors']
+    X = model_data[target_cols]
+    target_cols_fit = [col for col in X.columns if col not in ['test',
+                                                               'visitors']]
+    Xsub = X[X['test'] == 1]
+    Xsub = Xsub.drop(['test'], axis=1)
+    X = X[X['test'] == 0]
+    X = X.drop(['test'], axis=1)
+
+    pipe = Pipeline([('scal', StandardScaler()),
+                     ('clf', MLPRegressor(verbose=1))])
+    parameters = {'clf__alpha': np.logspace(-5, 2, 7)}
+    pipe = GridSearchCV(pipe, parameters)
+    pipe.fit(X[target_cols_fit], X['visitors'])
+
+    # Predictions for submission
+
+    Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
+    NNSub = pd.read_csv('submissions/baseline.csv')
+    NNSub.visitors = pipe.predict(Xsub[target_cols_fit])
+    NNSub.to_csv('submissions/NN.csv', index=False)
+    
+    return NNSub
+
+def XGBoost():
+    """ Fit using XGBoosts """
+    model_data = pd.read_csv('output/main_tbl.csv')
+    target_cols = ['target_day', 'target_month', 'target_weekday',
+                   'target_year', 'latitude', 'longitude', 'holiday_flg',
+                   'reserve_visitors', 'test', 'visitors', 'min_visitors',
+                   'max_visitors', 'median_visitors']
+    X = model_data[target_cols]
+    
+    target_cols_fit = [col for col in X.columns if col not in ['test',
+                                                               'visitors']]
+    Xsub = X[X['test'] == 1]
+    Xsub = Xsub.drop(['test'], axis=1)
+    X = X[X['test'] == 0]
+    X = X.drop(['test'], axis=1)
+    
+
+    pipe = Pipeline([('scal', StandardScaler()),
+                     ('clf', xgb.XGBRegressor())])
+    parameters = {'clf__max_depth': np.linspace(2, 8, 7).astype(int),
+                  'clf__learning_rate': np.logspace(-4, -1, 4)}
+    pipe = GridSearchCV(pipe, parameters)
+    pipe.fit(X[target_cols_fit], X['visitors'])
+    print(pipe.best_params_)
+
+    # Predictions for submission
+    Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
+    XGBoost_sub = pd.read_csv('submissions/baseline.csv')
+    XGBoost_sub['visitors'] = pipe.predict(Xsub[target_cols_fit])
+    XGBoost_sub['visitors'] = XGBoost_sub['visitors'].apply(lambda x: np.expm1(x))
+    XGBoost_sub.to_csv('submissions/XGBoostGR.csv', index=False)
+    
+    return XGBoost_sub
+
 
 SGDTable = SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
                             hpg_reserve, hpg_store_info, date_info,
                             sample_submission, store_id_relation)
 
 # SGD_sub = SGDFit()
-ensembleSub = ensembleFit()
+# NNSub = NNFit()
+# ensembleSub = ensembleFit()
+XGBoostSub =  XGBoost()
