@@ -307,9 +307,9 @@ def extract_dates(pd_df, target_var, format_str="%Y-%m-%d %H:%M:%S",
     return pd_df
 
 
-def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
-                     hpg_store_info, date_info, sample_submission,
-                     store_id_relation):
+def RegrPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
+                      hpg_store_info, date_info, sample_submission,
+                      store_id_relation):
     """ Preprocessing of data for stochastic gradient descent modelling """
     # Join real data with data to predict into one dataframe, with a 'test'
     # label to define if training or test data.
@@ -377,12 +377,11 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
     mainTable.drop('target_hour', inplace=True, axis=1)
 
     # Add min, max, mean and median visitors as a feature
-    
     name = 'min_visitors'
-    temp[name] = mainTable[mainTable['test'] == 0].\
+    temp = mainTable[mainTable['test'] == 0].\
                  groupby(['air_store_id', 'target_weekday'],
                          as_index=False)['visitors'].min().rename(
-                                 columns={'visitors': name})[name]
+                                 columns={'visitors': name})
     name = 'max_visitors'
     temp[name] = mainTable[mainTable['test'] == 0].\
                  groupby(['air_store_id', 'target_weekday'],
@@ -420,7 +419,7 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
             mainTable[c] = mainTable[c].astype(np.float32)
 
     mainTable['visitors'] = mainTable['visitors'].apply(lambda x: np.log1p(x))
-
+    mainTable = mainTable.fillna(-1)
     # Save produced table to disk
     mainTable.to_csv('output/main_tbl.csv')
 
@@ -456,46 +455,17 @@ def plot_corr(size=8):
 # ## Modelling attempts
 
 
-def SGDFit():
-    """ Fit using stochastic gradient descent """
+def RegrFit(regrMethod='SGD'):
+    """ Fit using different regression methods, Stochastic gradient descent
+    is the default """
     model_data = pd.read_csv('output/main_tbl.csv')
     target_cols = ['target_day', 'target_month', 'target_weekday',
                    'target_year', 'latitude', 'longitude', 'holiday_flg',
                    'reserve_visitors', 'test', 'visitors', 'min_visitors',
-                   'max_visitors', 'median_visitors']
+                   'max_visitors', 'median_visitors', 'mean_visitors',
+                   'count_visitors']
     X = model_data[target_cols]
-    
-    target_cols_fit = [col for col in X.columns if col not in ['test',
-                                                               'visitors']]
-    Xsub = X[X['test'] == 1]
-    Xsub = Xsub.drop(['test'], axis=1)
-    X = X[X['test'] == 0]
-    X = X.drop(['test'], axis=1)
-    
 
-    pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', SGDRegressor())])
-    parameters = {'clf__alpha': np.logspace(-4, 1, 6)}
-    pipe = GridSearchCV(pipe, parameters)
-    pipe.fit(X[target_cols_fit], X['visitors'])
-    print(pipe.best_params_)
-
-    # Predictions for submission
-    Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
-    SGD_sub = pd.read_csv('submissions/baseline.csv')
-    SGD_sub['visitors'] = pipe.predict(Xsub[target_cols_fit])
-    SGD_sub['visitors'] = SGD_sub['visitors'].apply(lambda x: np.expm1(x))
-    SGD_sub.to_csv('submissions/SGD.csv', index=False)
-    
-    return SGD_sub
-
-def ensembleFit():
-    """ Fit using gradient boosted regression """
-    model_data = pd.read_csv('output/main_tbl.csv')
-    target_cols = ['target_day', 'target_month', 'target_weekday',
-                   'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'reserve_visitors', 'test', 'visitors']
-    X = model_data[target_cols]
     target_cols_fit = [col for col in X.columns if col not in ['test',
                                                                'visitors']]
     Xsub = X[X['test'] == 1]
@@ -503,95 +473,45 @@ def ensembleFit():
     X = X[X['test'] == 0]
     X = X.drop(['test'], axis=1)
 
-    pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', GradientBoostingRegressor(verbose=1))])
-    parameters = {'clf__max_depth': np.linspace(1, 6, 6),
-                  'clf__learning_rate': np.logspace(-3, 2, 6)}
-    pipe = GridSearchCV(pipe, parameters)
-    pipe.fit(X[target_cols_fit], X['visitors'])
-    print(pipe.feature_importances_)
-    print(pipe.loss_)
+    if regrMethod == 'XGBoost':
+        pipe = Pipeline([('scal', StandardScaler()),
+                         ('clf', xgb.XGBRegressor(eval_metric='rmse'))])
+        parameters = {'clf__max_depth': np.linspace(2, 8, 7).astype(int),
+                      'clf__learning_rate': np.logspace(-4, -1, 4),
+                      'clf__n_estimators': np.logspace(2, 6, 5).astype(int)}
+        filename = 'submissions/XGBoostGR.csv'
+    elif regrMethod == 'NN':
+        pipe = Pipeline([('scal', StandardScaler()),
+                         ('clf', MLPRegressor(verbose=1))])
+        parameters = {'clf__alpha': np.logspace(-5, 2, 7)}
+        filename = 'submissions/NN.csv'
+    elif regrMethod == 'ensemble':
+        pipe = Pipeline([('scal', StandardScaler()),
+                         ('clf', GradientBoostingRegressor(verbose=1))])
+        parameters = {'clf__max_depth': np.linspace(1, 6, 6),
+                      'clf__learning_rate': np.logspace(-3, 2, 6)}
+        filename = 'submissions/ensemble.csv'
+    elif regrMethod == 'SGD':
+        pipe = Pipeline([('scal', StandardScaler()),
+                         ('clf', SGDRegressor(verbose=1))])
+        parameters = {'clf__alpha': np.logspace(-4, 1, 6)}
+        filename = 'submissions/SGD.csv'
 
-    # Predictions for submission
-
-    Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
-    ensembleSub = pd.read_csv('submissions/baseline.csv')
-    ensembleSub.visitors = pipe.predict(Xsub[target_cols_fit])
-    ensembleSub.to_csv('submissions/ensemble.csv', index=False)
-    
-    return ensembleSub
-
-def NNFit():
-    """ Fit using a neural network """
-    model_data = pd.read_csv('output/main_tbl.csv')
-    target_cols = ['target_day', 'target_month', 'target_weekday',
-                   'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'reserve_visitors', 'test', 'visitors', 'air_genre_name',
-                   'air_area_name']
-    X = model_data[target_cols]
-    target_cols_fit = [col for col in X.columns if col not in ['test',
-                                                               'visitors']]
-    Xsub = X[X['test'] == 1]
-    Xsub = Xsub.drop(['test'], axis=1)
-    X = X[X['test'] == 0]
-    X = X.drop(['test'], axis=1)
-
-    pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', MLPRegressor(verbose=1))])
-    parameters = {'clf__alpha': np.logspace(-5, 2, 7)}
     pipe = GridSearchCV(pipe, parameters)
     pipe.fit(X[target_cols_fit], X['visitors'])
 
     # Predictions for submission
-
     Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
-    NNSub = pd.read_csv('submissions/baseline.csv')
-    NNSub.visitors = pipe.predict(Xsub[target_cols_fit])
-    NNSub.to_csv('submissions/NN.csv', index=False)
-    
-    return NNSub
+    regrSub = pd.read_csv('submissions/baseline.csv')
+    regrSub['visitors'] = pipe.predict(Xsub[target_cols_fit])
+    regrSub['visitors'] = regrSub['visitors'].apply(lambda x: np.expm1(x))
+    regrSub.to_csv(filename, index=False)
 
-def XGBoost():
-    """ Fit using XGBoosts """
-    model_data = pd.read_csv('output/main_tbl.csv')
-    target_cols = ['target_day', 'target_month', 'target_weekday',
-                   'target_year', 'latitude', 'longitude', 'holiday_flg',
-                   'reserve_visitors', 'test', 'visitors', 'min_visitors',
-                   'max_visitors', 'median_visitors']
-    X = model_data[target_cols]
-    
-    target_cols_fit = [col for col in X.columns if col not in ['test',
-                                                               'visitors']]
-    Xsub = X[X['test'] == 1]
-    Xsub = Xsub.drop(['test'], axis=1)
-    X = X[X['test'] == 0]
-    X = X.drop(['test'], axis=1)
-    
-
-    pipe = Pipeline([('scal', StandardScaler()),
-                     ('clf', xgb.XGBRegressor(eval_metric='rmse'))])
-    parameters = {'clf__max_depth': np.linspace(2, 8, 7).astype(int),
-                  'clf__learning_rate': np.logspace(-4, -1, 4),
-                  'clf__n_estimators': np.logspace(2, 6, 5).astype(int)}
-    pipe = GridSearchCV(pipe, parameters)
-    pipe.fit(X[target_cols_fit], X['visitors'])
-    print(pipe.best_params_)
-
-    # Predictions for submission
-    Xsub['visitors'] = pipe.predict(Xsub[target_cols_fit])
-    XGBoost_sub = pd.read_csv('submissions/baseline.csv')
-    XGBoost_sub['visitors'] = pipe.predict(Xsub[target_cols_fit])
-    XGBoost_sub['visitors'] = XGBoost_sub['visitors'].apply(lambda x: np.expm1(x))
-    XGBoost_sub.to_csv('submissions/XGBoostGR.csv', index=False)
-    
-    return XGBoost_sub
+    return regrSub, pipe
 
 
-SGDTable = SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
-                            hpg_reserve, hpg_store_info, date_info,
-                            sample_submission, store_id_relation)
+regrTable = RegrPreprocessing(air_reserve, air_store_info, air_visit_data,
+                              hpg_reserve, hpg_store_info, date_info,
+                              sample_submission, store_id_relation)
 
-# SGD_sub = SGDFit()
-# NNSub = NNFit()
-# ensembleSub = ensembleFit()
-# XGBoostSub =  XGBoost()
+regrSub, pipeFit = RegrFit('SGD')
