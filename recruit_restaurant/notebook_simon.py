@@ -42,7 +42,6 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_squared_log_error
 from itertools import product
 import xgboost as xgb
 # Suppress all futurewarnings in console
@@ -336,7 +335,7 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                                        .sum().reset_index()
     mainTable = mainTable.merge(air_reserve, how='left',
                                 on=['air_store_id', 'visit_date'])
-    mainTable['reserve_visitors'] = mainTable['reserve_visitors'].fillna(0)
+    mainTable['reserve_visitors'] = mainTable['reserve_visitors'].fillna(-1)
 
     # Add hpg reservation data to table, filling NaNs with zero
 
@@ -377,32 +376,48 @@ def SGDPreprocessing(air_reserve, air_store_info, air_visit_data, hpg_reserve,
                               format_str="%Y-%m-%d", prefix='target')
     mainTable.drop('target_hour', inplace=True, axis=1)
 
-    # Add min, max and median visitors as a feature
+    # Add min, max, mean and median visitors as a feature
+    
+    name = 'min_visitors'
+    temp[name] = mainTable[mainTable['test'] == 0].\
+                 groupby(['air_store_id', 'target_weekday'],
+                         as_index=False)['visitors'].min().rename(
+                                 columns={'visitors': name})[name]
+    name = 'max_visitors'
+    temp[name] = mainTable[mainTable['test'] == 0].\
+                 groupby(['air_store_id', 'target_weekday'],
+                         as_index=False)['visitors'].max().rename(
+                                 columns={'visitors': name})[name]
+    name = 'median_visitors'
+    temp[name] = mainTable[mainTable['test'] == 0].\
+                 groupby(['air_store_id', 'target_weekday'],
+                         as_index=False)['visitors'].median().rename(
+                                 columns={'visitors': name})[name]
+    name = 'count_visitors'
+    temp[name] = mainTable[mainTable['test'] == 0].\
+                 groupby(['air_store_id', 'target_weekday'],
+                         as_index=False)['visitors'].count().rename(
+                                 columns={'visitors': name})[name]
+    name = 'mean_visitors'
+    temp[name] = mainTable[mainTable['test'] == 0].\
+                 groupby(['air_store_id', 'target_weekday'],
+                         as_index=False)['visitors'].mean().rename(
+                                 columns={'visitors': name})[name]
+    mainTable = pd.merge(mainTable, temp, how='left',
+                         on=['air_store_id', 'target_weekday'])
 
-    temp = mainTable.groupby(['air_store_id', 'target_weekday'],
-                             as_index=False)['visitors'].min().rename(
-                                     columns={'visitors': 'min_visitors'})
-    mainTable = pd.merge(mainTable, temp, how='left', 
-                         on=['air_store_id', 'target_weekday'])
-    
-    temp = mainTable.groupby(['air_store_id', 'target_weekday'],
-                             as_index=False)['visitors'].max().rename(
-                                     columns={'visitors': 'max_visitors'})
-    mainTable = pd.merge(mainTable, temp, how='left', 
-                         on=['air_store_id', 'target_weekday'])
-    
-    temp = mainTable.groupby(['air_store_id', 'target_weekday'],
-                             as_index=False)['visitors'].median().rename(
-                                     columns={'visitors': 'median_visitors'})
-    mainTable = pd.merge(mainTable, temp, how='left', 
-                         on=['air_store_id', 'target_weekday'])
-    
     # Use label encoder for restaurant name and genre
     le = LabelEncoder()
     for column in mainTable:
         if column == 'air_genre_name' or column == 'air_area_name':
             le.fit(mainTable[column])
-            mainTable[column]=le.transform(mainTable[column])
+            mainTable[column] = le.transform(mainTable[column])
+
+    # Bind to float32, as in
+    # https://www.kaggle.com/michelj/simple-xgboost-starter-0-0655
+    for c, dtype in zip(mainTable.columns, mainTable.dtypes):
+        if dtype == np.float64:
+            mainTable[c] = mainTable[c].astype(np.float32)
 
     mainTable['visitors'] = mainTable['visitors'].apply(lambda x: np.log1p(x))
 
@@ -579,4 +594,4 @@ SGDTable = SGDPreprocessing(air_reserve, air_store_info, air_visit_data,
 # SGD_sub = SGDFit()
 # NNSub = NNFit()
 # ensembleSub = ensembleFit()
-XGBoostSub =  XGBoost()
+# XGBoostSub =  XGBoost()
