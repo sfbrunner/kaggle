@@ -43,7 +43,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.pipeline import Pipeline
 from itertools import product
-import xgboost as xgb
+#import xgboost as xgb
 # Suppress all futurewarnings in console
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -135,7 +135,7 @@ def nameFBProphet(air_visit_data, forecastDays, holidays, trainDays, subTable):
         m.plot(thisSubPred)
         thisSubPred['ds'] = thisSubPred['ds'].astype(str)
         totalPred[storeName] = thisSubPred[['yhat']]
-        print(str(loopNo)+" ", end='')
+        print(str(loopNo)+", end=''")
         loopNo = loopNo + 1
 
     totalPred = pd.melt(totalPred)

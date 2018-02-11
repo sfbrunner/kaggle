@@ -1,0 +1,176 @@
+---
+title: "gresearch.Rmd"
+author: "Simon Brunner"
+date: "10 February 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+source('../kaggle_sourcer.R')
+```
+
+## Load data
+
+### Training data
+```{r}
+train = tbl_df(fread('input/train.csv', stringsAsFactors=T)) %>%
+  mutate(MSSubClass = factor(MSSubClass)) %>%
+  rename(SsnPorch3 = `3SsnPorch`, FlrSF1st = `1stFlrSF`, FlrSF2nd = `2ndFlrSF`)
+
+summary(train)
+```
+
+### Test data
+```{r}
+test = tbl_df(fread('input/test.csv', stringsAsFactors = T)) %>%
+  mutate(MSSubClass = factor(MSSubClass)) %>%
+  rename(SsnPorch3 = `3SsnPorch`, FlrSF1st = `1stFlrSF`, FlrSF2nd = `2ndFlrSF`)
+```
+
+### Merge all data
+```{r}
+all_dat = rbind(train %>% mutate(train=1),
+                test %>% mutate(SalePrice = 0, train=0))
+```
+
+## Prepare for machine learning tasks
+### Define test and training observations
+```{r}
+alltrain = c(1:nrow(train))
+alltest = c((nrow(train)+1):nrow(all_dat))
+  
+learntrain = sample(alltrain, size=length(alltrain)/3*2)
+learntest = setdiff(alltrain, learntrain)
+```
+
+## Visual exploration of data
+```{r}
+# Get numeric and integer columns
+all_class = sapply(all_dat, class)
+chosen_col = c(1:ncol(all_dat))[-which(all_class == 'factor')]
+all_dat %>% 
+  gather(key = 'Predictor', value='Value', chosen_col) %>%
+  group_by(Predictor) %>% mutate(Value = Value/mean(Value)) %>%
+ggplot(aes(sample=(Value), color=Predictor)) + geom_qq()
+```
+
+## Establishing a baseline
+To know how well we are doing, it's helpful to have a baseline prediction. For example, we can use the mean or median house price as a default label and evaluate the accuracy of prediction using this value.
+```{r}
+get_eval_metric <- function(target, fitted) {
+  return(sqrt(mean((log(fitted)-log(target))^2, na.rm=T)))
+}
+RMSD_train = get_eval_metric(train$SalePrice, rep(median(train$SalePrice), dim(train)[1]))
+RMSD_train
+```
+
+### Create baseline submission
+```{r}
+submission_templ = tbl_df(fread('input/sample_submission.csv'))
+submission_templ$SalePrice = median(train$SalePrice)
+fwrite(submission_templ, 'submissions/baseline_median.csv')
+```
+The score for the baseline submission is 0.41889 - that's the score to beat.
+
+### Create more sophisticated baseline, using logistic Lasso regression
+```{r}
+ml_baseline = makeRegrTask(data = all_dat, target='SalePrice')
+lrn_baseline = makeLearner("regr.cvglmnet")
+getParamSet(lrn_baseline)
+lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
+                                     classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
+resampler = makeResampleDesc('CV', iters=3, stratify.cols = c('Neighborhood'))
+
+model = train(lrn_baseline_imp, ml_baseline, subset=learntrain)
+r = resample(lrn_baseline_imp, ml_baseline, resampling = resampler, measures = list(rmse))
+
+pred = predict(r, task = ml_baseline, subset = learntest)
+performance(pred, measures = list(rmse))
+get_eval_metric(pred$data$truth, pred$data$response)
+```
+
+#### Create a submission from this task
+```{r}
+model = train(lrn_baseline_imp, ml_baseline, subset=alltrain)
+pred = predict(model, task = ml_baseline, subset = alltest)
+
+fwrite(pred$data %>% dplyr::select(Id=id, SalePrice=response), 'submissions/mlr_baseline.csv')
+```
+That scored 0.16273 - a huge improvement over the median!
+
+## Feature engineering
+Ideas:
+* Merge Street and Alley into single feature
+* Deal with NAs (solved using median for now)
+* Deal with small factor levels for Neighborhood, Exterior1st, Exterior2nd
+* Feature for difference between year built and remodeling date - done
+* Feature for remodelling yes/no - done
+* Convert year built into age - not necessary
+* Create feature for number of floors - done
+* Get total footage
+* GarageYrBlt - convert to age - not necessary
+* Make sure variables are generally normally distributed
+* How to deal with factor values that are only present in test set?
+* Get scales of variables right - might affect Lasso!
+
+### Years since remodelling
+```{r}
+all_dat_feng = all_dat %>%
+  mutate(years_since_remod = YearRemodAdd-YearBuilt, is_remod = factor(ifelse(YearRemodAdd==YearBuilt, F, T))) %>%
+  mutate(years_since_remod = ifelse(years_since_remod<0, 0, years_since_remod)) %>%
+  mutate(has_2floors = factor(ifelse(FlrSF2nd==0, F, T)))
+  
+summary(all_dat_feng[,c('years_since_remod', 'is_remod')])
+```
+
+### Factors with many levels
+```{r}
+replace_factor_median_target <- function(data, target_var, factor_feat) {
+  #factor_feat_idx = match(factor_feat, names(all_dat_feng))
+  data = data %>%
+    group_by(.dots=factor_feat, train) %>%
+    mutate(median_target = median(get(target_var))) %>% ungroup() %>%
+    group_by(.dots=factor_feat) %>% mutate(median_target = max(median_target)) %>% ungroup() %>%
+    mutate(median_target = ifelse(is.na(get(factor_feat)), median(median_target), median_target))
+  data[,paste0('median_', factor_feat)] = data$median_target
+  data = dplyr::select(data, -median_target)
+  return(data)
+}
+all_dat_feng = replace_factor_median_target(all_dat_feng, 'SalePrice', 'Neighborhood')
+all_dat_feng = replace_factor_median_target(all_dat_feng, 'SalePrice', 'Exterior1st')
+all_dat_feng = replace_factor_median_target(all_dat_feng, 'SalePrice', 'Exterior2nd')
+#all_dat_feng = all_dat_feng %>% dplyr::select(-Neighborhood, -Exterior1st, -Exterior2nd)
+
+summary(all_dat_feng[,c('median_Neighborhood', 'median_Exterior1st', 'median_Exterior2nd')])
+```
+
+### Dealing with factor levels only present in test set
+```{r}
+target_feat = 'Neighborhood'
+levels_train = levels(factor(as.character(as.data.frame(all_dat_feng %>% filter(train==1))[,target_feat])))
+levels_test = levels(factor(as.character(as.data.frame(all_dat_feng %>% filter(train==0))[,target_feat])))
+```
+
+
+```{r}
+ml_baseline = makeRegrTask(data = all_dat_feng, target='SalePrice')
+lrn_baseline = makeLearner("regr.cvglmnet")
+getParamSet(lrn_baseline)
+lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
+                                     classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
+
+model = train(lrn_baseline_imp, ml_baseline, subset=learntrain)
+
+pred = predict(model, task = ml_baseline, subset = learntest)
+performance(pred, measures = list(rmse))
+get_eval_metric(pred$data$truth, pred$data$response)
+```
+
+#### Create a submission from feature engineered data
+```{r}
+model = train(lrn_baseline_imp, ml_baseline, subset=alltrain)
+pred = predict(model, task = ml_baseline, subset = alltest)
+
+fwrite(pred$data %>% dplyr::select(Id=id, SalePrice=response), 'submissions/mlr_feateng.csv')
+```
+This got 0.16714, not an improvement! Possibly overfitting is to blame?
