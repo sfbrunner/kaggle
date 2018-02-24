@@ -1,0 +1,203 @@
+---
+title: "ncaa"
+author: "Simon Brunner"
+date: "21 February 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+source('../kaggle_sourcer.R', chdir=T)
+```
+
+# Load data
+```{r}
+w_results_ncaa = tbl_df(fread('input/WNCAATourneyCompactResults.csv'))
+w_results_reg  = tbl_df(fread('input/WRegularSeasonCompactResults.csv'))
+
+table(w_results_ncaa$Season)
+table(w_results_reg$Season)
+w_results_ncaa
+w_results_reg
+
+```
+
+```{r}
+submission_tmpl = tbl_df(fread('submissions/WSampleSubmissionStage1.csv'))
+```
+
+# Feature engineering
+Ideas:
+* Ratio of winning vs loosing
+* Average score difference
+* Average points per game
+* Ratio of winning abroad vs at home
+* Account for differences of regular vs NCAA
+* NumOT?
+* How to incorporate time component? Ie. is team getting better over time? Worse?
+
+## Engineer some of the above features that rely only results tables
+```{r}
+results_all = rbind(w_results_ncaa %>% mutate(stage = 'ncaa'), w_results_reg %>% mutate(stage = 'reg'))
+
+team_summary = results_all %>% 
+  gather('winloss', 'team_id', c('WTeamID', 'LTeamID')) %>%
+  mutate(score_diff = ifelse(winloss=='WTeamID', WScore-LScore, LScore-WScore)) %>%
+  mutate(score = ifelse(winloss=='WTeamID', WScore, LScore)) %>%
+  mutate(homegame = ifelse(WLoc=='N', 'N',
+                           ifelse(winloss=='WTeamID' & WLoc == 'H', 'H', 
+                                 ifelse(winloss=='WTeamID' & WLoc == 'A', 'A', 
+                                        ifelse(winloss=='LTeamID' & WLoc == 'A', 'H', 'A'))))) %>% 
+  dplyr::select(-WScore, -LScore) %>%
+  distinct() %>%
+  group_by(winloss, team_id) %>% mutate(num_games = n()) %>% ungroup() %>%
+  spread(key=winloss, value=num_games, fill=0) %>%
+  group_by(team_id, stage) %>% mutate(games_per_stage = n()) %>% ungroup() %>%
+  spread(key=stage, value=games_per_stage, fill=0) %>%
+  group_by(team_id) %>%
+  summarise(score_mean = mean(score), score_diff_mean = mean(score_diff), 
+            losses=max(LTeamID), wins=max(WTeamID),
+            ncaa_games=max(ncaa), reg_games=max(reg)) %>%
+  mutate(lw_ratio = losses/wins)
+team_summary
+```
+
+## Prepare a training set of games
+In this case, we'll use a binary outcome variable (win or loose), rather than a probability based on wscore / lscore
+```{r}
+train_games = results_all %>%
+  mutate(game_id = ifelse(WTeamID<LTeamID, 
+                          paste(Season, WTeamID, LTeamID, sep='_'), 
+                          paste(Season, LTeamID, WTeamID, sep='_'))) %>%
+  mutate(result = ifelse(WTeamID<LTeamID, 1, 0)) %>%
+  mutate(team1 = ifelse(WTeamID<LTeamID, WTeamID, LTeamID)) %>%
+  mutate(team2 = ifelse(WTeamID<LTeamID, LTeamID, WTeamID)) %>%
+  dplyr::select(ID=game_id, Pred=result, team1, team2)
+train_games
+```
+
+## Preparing the games test set
+```{r}
+test_games = submission_tmpl %>%
+  mutate(team1 = as.numeric(substr(ID, 6, 9)), 
+         team2 = as.numeric(substr(ID, 11, 14)))
+test_games
+```
+
+## Concatenate all games
+```{r}
+all_games = rbind(
+  train_games %>% mutate(set='train'),
+  test_games %>% mutate(set='test') %>% mutate(Pred=0)
+)
+all_games
+```
+
+## Combine engineered features into first model
+
+### Merge games with team data
+```{r}
+train_dat = all_games %>%
+  left_join(team_summary, by=c('team1'='team_id'), suffix=c("", "_1")) %>%
+  left_join(team_summary, by=c('team1'='team_id'), suffix=c("", "_2"))
+train_dat
+```
+
+### Define test and training observations
+```{r}
+alltrain = c(1:nrow(train_games))
+alltest = c((nrow(train_games)+1):nrow(all_games))
+  
+learntrain = sample(alltrain, size=length(alltrain)/3*2)
+learntest = setdiff(alltrain, learntrain)
+```
+
+### Train model using the binary training data
+```{r}
+ml_baseline = makeClassifTask(data = train_dat %>% dplyr::select(-ID, -set, -team1, -team2) %>% mutate(Pred = factor(Pred)),
+                              target='Pred')
+lrn_baseline = makeLearner("classif.cvglmnet", predict.type = 'prob')
+getParamSet(lrn_baseline)
+lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
+                                     classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
+
+tune_pars = makeParamSet(
+  makeNumericParam('alpha', lower=-10, upper=10, trafo = function(x) 10^x)
+)
+grid = makeTuneControlGrid()
+resampler = makeResampleDesc('CV', iters=5)
+
+#tune_result = tuneParams(lrn_baseline_imp, task = ml_baseline, resampling = resampler, par.set = tune_pars, control = grid)
+#tune_result$x
+
+lrn_tuned = setHyperPars(lrn_baseline_imp) #, par.vals = list('alpha'=0))
+
+#lrn_tuned = setPredictType(lrn_tuned, predict.type='prob')
+model = train(lrn_tuned, ml_baseline, subset=learntrain)
+
+# Performance on train set
+pred = predict(model, task = ml_baseline, subset = learntrain)
+performance(pred, measures = list(acc))
+
+# Performance on test set
+pred = predict(model, task = ml_baseline, subset = learntest)
+performance(pred, measures = list(acc))
+
+calculateConfusionMatrix(pred, relative=T)
+#get_eval_metric(pred$data$truth, pred$data$response)
+```
+
+### Explore the returned model
+```{r}
+learner_model = getLearnerModel(model, more.unwrap=T)
+best_lambda = learner_model$lambda.min
+lambda_idx = which(learner_model$lambda == best_lambda)
+beta_coeffs = learner_model$glmnet.fit$beta[,lambda_idx]
+barplot(beta_coeffs)
+```
+
+### Construct a submission
+```{r}
+submission_pred = predict(model, task = ml_baseline, subset = alltest)
+submission_probs = getPredictionProbabilities(submission_pred, cl='1')
+
+submission_glmnet = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
+submission_glmnet
+
+write.csv(submission_glmnet, 'submissions/first_glmnet.csv', quote = F, row.names = F)
+```
+
+### Try a simple logistic regression instead
+This performs equally well as glmnet. More features should probably be included.
+```{r}
+ml_baseline = makeClassifTask(data = train_dat %>% dplyr::select(-ID, -set, -team1, -team2) %>% mutate(Pred = factor(Pred)),
+                              target='Pred')
+lrn_baseline = makeLearner("classif.logreg", predict.type = 'prob')
+getParamSet(lrn_baseline)
+lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
+                                     classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
+
+tune_pars = makeParamSet(
+  makeNumericParam('alpha', lower=-10, upper=10, trafo = function(x) 10^x)
+)
+grid = makeTuneControlGrid()
+resampler = makeResampleDesc('CV', iters=5)
+
+#tune_result = tuneParams(lrn_baseline_imp, task = ml_baseline, resampling = resampler, par.set = tune_pars, control = grid)
+#tune_result$x
+
+lrn_tuned = setHyperPars(lrn_baseline_imp) #, par.vals = list('alpha'=0))
+
+#lrn_tuned = setPredictType(lrn_tuned, predict.type='prob')
+model = train(lrn_tuned, ml_baseline, subset=learntrain)
+
+# Performance on train set
+pred = predict(model, task = ml_baseline, subset = learntrain)
+performance(pred, measures = list(acc))
+
+# Performance on test set
+pred = predict(model, task = ml_baseline, subset = learntest)
+performance(pred, measures = list(acc))
+
+calculateConfusionMatrix(pred, relative=T)
+#get_eval_metric(pred$data$truth, pred$data$response)
+```

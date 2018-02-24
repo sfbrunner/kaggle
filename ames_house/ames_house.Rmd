@@ -79,24 +79,42 @@ lrn_baseline = makeLearner("regr.cvglmnet")
 getParamSet(lrn_baseline)
 lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
                                      classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
-resampler = makeResampleDesc('CV', iters=3, stratify.cols = c('Neighborhood'))
 
-model = train(lrn_baseline_imp, ml_baseline, subset=learntrain)
-r = resample(lrn_baseline_imp, ml_baseline, resampling = resampler, measures = list(rmse))
+tune_pars = makeParamSet(
+  makeNumericParam('alpha', lower=-10, upper=10, trafo = function(x) 10^x)
+)
+grid = makeTuneControlGrid()
+resampler = makeResampleDesc('CV', iters=5, stratify.cols = c('Neighborhood'))
 
-pred = predict(r, task = ml_baseline, subset = learntest)
+tune_result = tuneParams(lrn_baseline_imp, task = ml_baseline, resampling = resampler, par.set = tune_pars, control = grid)
+tune_result$x
+
+lrn_tuned = setHyperPars(lrn_baseline_imp, par.vals = list('alpha'=0))
+
+model = train(lrn_tuned, ml_baseline, subset=learntrain)
+
+pred = predict(model, task = ml_baseline, subset = learntest)
 performance(pred, measures = list(rmse))
 get_eval_metric(pred$data$truth, pred$data$response)
 ```
 
+#### Plot effect of GridCV
+```{r}
+gridcv_data = generateHyperParsEffectData(tune_result)
+plotHyperParsEffect(gridcv_data, x = "alpha", y = "mse.test.mean",
+  plot.type = "line")
+```
+
 #### Create a submission from this task
 ```{r}
-model = train(lrn_baseline_imp, ml_baseline, subset=alltrain)
+model = train(lrn_tuned, ml_baseline, subset=alltrain)
 pred = predict(model, task = ml_baseline, subset = alltest)
 
-fwrite(pred$data %>% dplyr::select(Id=id, SalePrice=response), 'submissions/mlr_baseline.csv')
+fwrite(pred$data %>% dplyr::select(Id=id, SalePrice=response), 'submissions/mlr_baseline_ridge.csv')
 ```
 That scored 0.16273 - a huge improvement over the median!
+GridCV scored 0.16083, an improvement!
+Ridge scored 0.14990, massive improvement!
 
 ## Feature engineering
 Ideas:
