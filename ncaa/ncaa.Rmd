@@ -140,18 +140,21 @@ all_games
 
 ### Merge games with team data
 ```{r}
-train_dat = all_games %>%
-  left_join(team_summary, by=c('team1'='team_season'), suffix=c("", "_1")) %>%
-  left_join(team_summary, by=c('team2'='team_season'), suffix=c("", "_2"))
-train_dat
+train_dat1 = all_games %>% left_join(team_summary, by=c('team1'='team_season'))
+train_dat2 = all_games %>% left_join(team_summary, by=c('team2'='team_season'))
+
+train_dat_diff = train_dat1
+feat_names = setdiff(names(train_dat_diff), c('ID', 'Pred', 'team1', 'team2', 'set', 'team_id', 'Season', 'seed_reg'))
+train_dat_diff[,feat_names] = train_dat1[,feat_names] - train_dat2[,feat_names]
+train_dat = train_dat_diff
 ```
 
 ### Engineer game-level features
 Eg. difference in seed, difference in average score
 ```{r}
-train_dat = train_dat %>%
-  mutate(seed_diff = seed - seed_2)
-train_dat
+#train_dat = train_dat %>%
+#  mutate(seed_diff = seed - seed_2)
+#train_dat
 ```
 
 ### Define test and training observations
@@ -225,7 +228,7 @@ write.csv(submission_glmnet, 'submissions/glmnet_seed.csv', quote = F, row.names
 ### Try a simple logistic regression instead
 This performs equally well as glmnet. More features should probably be included.
 ```{r}
-pipe_logreg = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(-ID, -set, -team1, -team2, -seed_reg, -seed_reg_2) %>% mutate(Pred = factor(Pred)), 
+pipe_logreg = simple_mlr_pipeline(alldat = train_dat[,c('Pred', feat_names)] %>% mutate(Pred = factor(Pred)), 
                             target_feat = 'Pred', 
                             learner_val = 'classif.logreg', 
                             subset_train = learntrain, 
@@ -271,7 +274,7 @@ write.csv(submission_glmnet, 'submissions/logreg_seed_diff.csv', quote = F, row.
 ### Try random forest
 This performs equally well as glmnet. More features should probably be included.
 ```{r}
-pipe_xbg = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(-ID, -set, -team1, -team2, -seed_reg, -seed_reg_2) %>% mutate(Pred = factor(Pred)), 
+pipe_xbg = simple_mlr_pipeline(alldat = train_dat[,c('Pred', feat_names)] %>% mutate(Pred = factor(Pred)), 
                             target_feat = 'Pred', 
                             learner_val = 'classif.xgboost', 
                             #learner_val = 'classif.randomForest', 
@@ -284,5 +287,5 @@ submission_probs = getPredictionProbabilities(submission_pred, cl='1')
 submission_xgb = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
 submission_xgb
 
-write.csv(submission_xgb, 'submissions/xgb.csv', quote = F, row.names = F)
+write.csv(submission_xgb, 'submissions/team_diffs_xgb.csv', quote = F, row.names = F)
 ```
