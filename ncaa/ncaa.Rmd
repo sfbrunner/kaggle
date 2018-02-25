@@ -163,11 +163,11 @@ Eg. difference in seed, difference in average score
 alltrain = c(1:nrow(train_games))
 alltest = c((nrow(train_games)+1):nrow(all_games))
   
-learntrain = sample(alltrain, size=length(alltrain)/3*2)
-learntest = setdiff(alltrain, learntrain)
-
-#learntrain = which((train_games %>% mutate(Season = as.numeric(substr(ID, 1,4))))$Season < 2014)
+#learntrain = sample(alltrain, size=length(alltrain)/3*2)
 #learntest = setdiff(alltrain, learntrain)
+
+learntrain = which((train_games %>% mutate(Season = as.numeric(substr(ID, 1,4))))$Season < 2014)
+learntest = setdiff(alltrain, learntrain)
 ```
 
 ### Train model using the binary training data
@@ -269,12 +269,14 @@ submission_fake = submission_logreg %>%
   mutate(Pred = ifelse(is.na(outcome), Pred, outcome)) %>% 
   dplyr::select(ID, Pred)
 #table(submission_fake$outcome, submission_fake$is_known)
-submission_fake %>% distinct()
+submission_fake
+submission_fake %>%
+  ggplot(aes(x=Pred)) + geom_histogram()
 write_submission(submission_fake, 'submissions/fake_outcomes.csv')
 ```
 
 ### Try XGboost
-This performs equally well as glmnet. More features should probably be included.
+This performs much worse than logistic regression. Should be optimised.
 ```{r}
 pipe_xbg = simple_mlr_pipeline(alldat = train_dat[,c('Pred', feat_names)] %>% mutate(Pred = factor(Pred)), 
                             target_feat = 'Pred', 
