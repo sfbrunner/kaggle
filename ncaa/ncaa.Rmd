@@ -58,9 +58,9 @@ team_summary = results_all %>%
                                         ifelse(winloss=='LTeamID' & WLoc == 'A', 'H', 'A'))))) %>% 
   dplyr::select(-WScore, -LScore) %>%
   distinct() %>%
-  group_by(winloss, team_id) %>% mutate(num_games = n()) %>% ungroup() %>%
+  group_by(winloss, team_id, Season) %>% mutate(num_games = n()) %>% ungroup() %>%
   spread(key=winloss, value=num_games, fill=0) %>%
-  group_by(team_id, stage) %>% mutate(games_per_stage = n()) %>% ungroup() %>%
+  group_by(team_id, stage, Season) %>% mutate(games_per_stage = n()) %>% ungroup() %>%
   spread(key=stage, value=games_per_stage, fill=0) %>%
   group_by(team_id, Season) %>%
   summarise(score_mean = mean(score), score_diff_mean = mean(score_diff), 
