@@ -262,9 +262,12 @@ prepare_submission(data_tbl = train_dat, model = pipe_logreg$model, task = pipe_
 submission_logreg = prepare_submission(data_tbl = train_dat, model = pipe_logreg$model, task = pipe_logreg$task, subset = alltest, class_name = '1')
 
 submission_fake = submission_logreg %>%
-  left_join(all_games %>% filter(set=='train') %>% dplyr::select(ID, outcome=Pred) %>% distinct() %>% mutate(is_known = T), by='ID', fill=NA) %>%
+  left_join(all_games %>% filter(set=='train') %>% 
+              group_by(ID) %>% summarise(Pred = sum(Pred)/n()) %>% ungroup() %>%
+              dplyr::select(ID, outcome=Pred) %>% mutate(is_known = T), by='ID', fill=NA) %>%
   distinct() %>%
-  mutate(Pred = outcome) %>% dplyr::select(ID, Pred)
+  mutate(Pred = ifelse(is.na(outcome), Pred, outcome)) %>% 
+  dplyr::select(ID, Pred)
 #table(submission_fake$outcome, submission_fake$is_known)
 submission_fake %>% distinct()
 write_submission(submission_fake, 'submissions/fake_outcomes.csv')
