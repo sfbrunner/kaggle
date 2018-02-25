@@ -13,27 +13,36 @@ source('../kaggle_sourcer.R', chdir=T)
 ```{r}
 w_results_ncaa = tbl_df(fread('input/WNCAATourneyCompactResults.csv'))
 w_results_reg  = tbl_df(fread('input/WRegularSeasonCompactResults.csv'))
+w_tourney_seeds = tbl_df(fread('input/WNCAATourneySeeds.csv'))
 
 table(w_results_ncaa$Season)
 table(w_results_reg$Season)
 w_results_ncaa
 w_results_reg
+w_tourney_seeds
 
 ```
 
+## Load the submission template
 ```{r}
 submission_tmpl = tbl_df(fread('submissions/WSampleSubmissionStage1.csv'))
 ```
+This scores 0.693147
 
 # Feature engineering
 Ideas:
-* Ratio of winning vs loosing
-* Average score difference
-* Average points per game
-* Ratio of winning abroad vs at home
+* Ratio of winning vs loosing - done
+* Average score difference - done
+* Average points per game - done
+* Ratio of winning abroad vs at home - done
 * Account for differences of regular vs NCAA
 * NumOT?
 * How to incorporate time component? Ie. is team getting better over time? Worse?
+* Measures for performance stability over last 5, 10, all years?
+* Exclude 2014+ seasons from training exercise?
+* Add additional data
+* Integrate seeds
+* Post team integration, calculate differences between the two teams
 
 ## Engineer some of the above features that rely only results tables
 ```{r}
@@ -53,12 +62,43 @@ team_summary = results_all %>%
   spread(key=winloss, value=num_games, fill=0) %>%
   group_by(team_id, stage) %>% mutate(games_per_stage = n()) %>% ungroup() %>%
   spread(key=stage, value=games_per_stage, fill=0) %>%
-  group_by(team_id) %>%
+  group_by(team_id, Season) %>%
   summarise(score_mean = mean(score), score_diff_mean = mean(score_diff), 
             losses=max(LTeamID), wins=max(WTeamID),
             ncaa_games=max(ncaa), reg_games=max(reg)) %>%
-  mutate(lw_ratio = losses/wins)
+  mutate(lw_ratio = ifelse(wins==0, 1, losses/wins), lw_diff = losses-wins) %>%
+  mutate(team_season = paste(team_id, Season, sep='_')) %>%
+  group_by(team_id) %>%
+  mutate(score_diff_stab = sd(score_diff_mean), lw_diff_stab = sd(lw_diff), lw_ratio_stab = sd(lw_ratio)) %>%
+  ungroup() %>%
+  mutate(season_bin4 = ntile(Season, 4)) %>%
+  group_by(team_id, season_bin4) %>% 
+  mutate(score_diff_stab_b4 = sd(score_diff_mean), lw_diff_stab_b4 = sd(lw_diff), lw_ratio_stab_b4 = sd(lw_ratio)) %>%
+  ungroup() %>%
+  mutate(season_bin8 = ntile(Season, 8)) %>%
+  group_by(team_id, season_bin8) %>% 
+  mutate(score_diff_stab_b8 = sd(score_diff_mean), lw_diff_stab_b8 = sd(lw_diff), lw_ratio_stab_b8 = sd(lw_ratio)) %>%
+  ungroup()
 team_summary
+```
+
+### Merge with seed data
+```{r}
+seed_tbl = w_tourney_seeds %>%
+  mutate(seed = as.numeric(substr(Seed, 2, 3))) %>%
+  mutate(seed_reg = substr(Seed, 1, 1)) %>%
+  mutate(team_season = paste(TeamID, Season, sep='_')) %>%
+  group_by(TeamID) %>%
+  mutate(seed_mean = mean(seed), seed_sd = sd(seed, na.rm=T)) %>%
+  ungroup() %>%
+  dplyr::select(team_season, seed, seed_reg, seed_mean, seed_sd)
+seed_tbl
+team_summary = left_join(team_summary, seed_tbl, by='team_season') %>%
+  mutate(seed = ifelse(is.na(seed), 300, seed),
+         seed_reg = ifelse(is.na(seed_reg), 'unseeded', seed_reg),
+         seed_mean = ifelse(is.na(seed_mean), 300, seed),
+         seed_sd = ifelse(is.na(seed_sd), 100, seed_sd))
+team_summary %>% glimpse()
 ```
 
 ## Prepare a training set of games
@@ -71,6 +111,7 @@ train_games = results_all %>%
   mutate(result = ifelse(WTeamID<LTeamID, 1, 0)) %>%
   mutate(team1 = ifelse(WTeamID<LTeamID, WTeamID, LTeamID)) %>%
   mutate(team2 = ifelse(WTeamID<LTeamID, LTeamID, WTeamID)) %>%
+  mutate(team1 = paste(team1, Season, sep='_'), team2 = paste(team2, Season, sep='_')) %>%
   dplyr::select(ID=game_id, Pred=result, team1, team2)
 train_games
 ```
@@ -78,8 +119,11 @@ train_games
 ## Preparing the games test set
 ```{r}
 test_games = submission_tmpl %>%
-  mutate(team1 = as.numeric(substr(ID, 6, 9)), 
-         team2 = as.numeric(substr(ID, 11, 14)))
+  mutate(Season = as.numeric(substr(ID, 1,4)),
+         team1 = as.numeric(substr(ID, 6, 9)), 
+         team2 = as.numeric(substr(ID, 11, 14))) %>%
+  mutate(team1 = paste(team1, Season, sep='_'), team2 = paste(team2, Season, sep='_')) %>%
+  dplyr::select(-Season)
 test_games
 ```
 
@@ -97,8 +141,16 @@ all_games
 ### Merge games with team data
 ```{r}
 train_dat = all_games %>%
-  left_join(team_summary, by=c('team1'='team_id'), suffix=c("", "_1")) %>%
-  left_join(team_summary, by=c('team1'='team_id'), suffix=c("", "_2"))
+  left_join(team_summary, by=c('team1'='team_season'), suffix=c("", "_1")) %>%
+  left_join(team_summary, by=c('team2'='team_season'), suffix=c("", "_2"))
+train_dat
+```
+
+### Engineer game-level features
+Eg. difference in seed, difference in average score
+```{r}
+train_dat = train_dat %>%
+  mutate(seed_diff = seed - seed_2)
 train_dat
 ```
 
@@ -109,95 +161,128 @@ alltest = c((nrow(train_games)+1):nrow(all_games))
   
 learntrain = sample(alltrain, size=length(alltrain)/3*2)
 learntest = setdiff(alltrain, learntrain)
+
+#learntrain = which((train_games %>% mutate(Season = as.numeric(substr(ID, 1,4))))$Season < 2014)
+#learntest = setdiff(alltrain, learntrain)
 ```
 
 ### Train model using the binary training data
 ```{r}
-ml_baseline = makeClassifTask(data = train_dat %>% dplyr::select(-ID, -set, -team1, -team2) %>% mutate(Pred = factor(Pred)),
-                              target='Pred')
-lrn_baseline = makeLearner("classif.cvglmnet", predict.type = 'prob')
-getParamSet(lrn_baseline)
-lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
-                                     classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
-
-tune_pars = makeParamSet(
-  makeNumericParam('alpha', lower=-10, upper=10, trafo = function(x) 10^x)
-)
-grid = makeTuneControlGrid()
-resampler = makeResampleDesc('CV', iters=5)
-
-#tune_result = tuneParams(lrn_baseline_imp, task = ml_baseline, resampling = resampler, par.set = tune_pars, control = grid)
-#tune_result$x
-
-lrn_tuned = setHyperPars(lrn_baseline_imp) #, par.vals = list('alpha'=0))
-
-#lrn_tuned = setPredictType(lrn_tuned, predict.type='prob')
-model = train(lrn_tuned, ml_baseline, subset=learntrain)
-
-# Performance on train set
-pred = predict(model, task = ml_baseline, subset = learntrain)
-performance(pred, measures = list(acc))
-
-# Performance on test set
-pred = predict(model, task = ml_baseline, subset = learntest)
-performance(pred, measures = list(acc))
-
-calculateConfusionMatrix(pred, relative=T)
-#get_eval_metric(pred$data$truth, pred$data$response)
+simple_mlr_pipeline <- function(alldat, target_feat, learner_val, subset_train, subset_test) {
+  ml_baseline = makeClassifTask(data = alldat, target=target_feat)
+  lrn_baseline = makeLearner(learner_val, predict.type = 'prob')
+  getParamSet(lrn_baseline)
+  lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
+                                       classes = list(integer = imputeMedian(), 
+                                                      numeric = imputeMedian(), 
+                                                      factor = imputeMode()))
+  
+  print('Training model')
+  model = train(lrn_baseline_imp, ml_baseline, subset=subset_train)
+  
+  # Performance on train set
+  print('Performance on train set')
+  pred = predict(model, task = ml_baseline, subset = subset_train)
+  print(performance(pred, measures = list(acc)))
+  
+  # Performance on test set
+  print('Performance on test set')
+  pred = predict(model, task = ml_baseline, subset = subset_test)
+  print(performance(pred, measures = list(acc)))
+  
+  print(calculateConfusionMatrix(pred, relative=T))
+  
+  list('task'=ml_baseline, 'learner'=lrn_baseline_imp, 'model'=model)
+}
+pipe1 = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(-ID, -set, -team1, -team2, -seed_reg, -seed_reg_2) %>% mutate(Pred = factor(Pred)), 
+                            target_feat = 'Pred', 
+                            learner_val = 'classif.cvglmnet', 
+                            subset_train = learntrain, 
+                            subset_test = learntest)
 ```
 
 ### Explore the returned model
 ```{r}
-learner_model = getLearnerModel(model, more.unwrap=T)
+learner_model = getLearnerModel(pipe1$model, more.unwrap=T)
 best_lambda = learner_model$lambda.min
 lambda_idx = which(learner_model$lambda == best_lambda)
 beta_coeffs = learner_model$glmnet.fit$beta[,lambda_idx]
-barplot(beta_coeffs)
+tibble(beta_coeff = names(beta_coeffs), beta_val = as.numeric(beta_coeffs)) %>%
+  ggplot(aes(x=beta_coeff, y=beta_val)) + geom_bar(stat='identity') + coord_flip()
 ```
 
 ### Construct a submission
 ```{r}
-submission_pred = predict(model, task = ml_baseline, subset = alltest)
+submission_pred = predict(pipe1$model, task = pipe1$task, subset = alltest)
 submission_probs = getPredictionProbabilities(submission_pred, cl='1')
 
 submission_glmnet = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
 submission_glmnet
 
-write.csv(submission_glmnet, 'submissions/first_glmnet.csv', quote = F, row.names = F)
+write.csv(submission_glmnet, 'submissions/glmnet_seed.csv', quote = F, row.names = F)
 ```
 
 ### Try a simple logistic regression instead
 This performs equally well as glmnet. More features should probably be included.
 ```{r}
-ml_baseline = makeClassifTask(data = train_dat %>% dplyr::select(-ID, -set, -team1, -team2) %>% mutate(Pred = factor(Pred)),
-                              target='Pred')
-lrn_baseline = makeLearner("classif.logreg", predict.type = 'prob')
-getParamSet(lrn_baseline)
-lrn_baseline_imp = makeImputeWrapper(lrn_baseline, 
-                                     classes = list(integer = imputeMedian(), numeric = imputeMedian(), factor = imputeMode()))
+pipe_logreg = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(-ID, -set, -team1, -team2, -seed_reg, -seed_reg_2) %>% mutate(Pred = factor(Pred)), 
+                            target_feat = 'Pred', 
+                            learner_val = 'classif.logreg', 
+                            subset_train = learntrain, 
+                            subset_test = learntest)
 
-tune_pars = makeParamSet(
-  makeNumericParam('alpha', lower=-10, upper=10, trafo = function(x) 10^x)
-)
-grid = makeTuneControlGrid()
-resampler = makeResampleDesc('CV', iters=5)
+learner_model = getLearnerModel(pipe_logreg$model, more.unwrap=T)
+best_lambda = learner_model$lambda.min
+lambda_idx = which(learner_model$lambda == best_lambda)
+beta_coeffs = learner_model$glmnet.fit$beta[,lambda_idx]
+tibble(beta_coeff = names(learner_model$coefficients), beta_val = as.numeric(learner_model$coefficients)) %>%
+  ggplot(aes(x=beta_coeff, y=beta_val)) + geom_bar(stat='identity') + coord_flip()
+```
 
-#tune_result = tuneParams(lrn_baseline_imp, task = ml_baseline, resampling = resampler, par.set = tune_pars, control = grid)
-#tune_result$x
+### Try a simple logistic regression instead
+Use only seed difference
+```{r}
+pipe_seed_diff = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(Pred, seed_diff) %>% 
+                                    mutate(Pred = factor(Pred)), 
+                            target_feat = 'Pred', 
+                            learner_val = 'classif.logreg', 
+                            subset_train = learntrain, 
+                            subset_test = learntest)
 
-lrn_tuned = setHyperPars(lrn_baseline_imp) #, par.vals = list('alpha'=0))
+learner_model = getLearnerModel(pipe_seed_diff$model, more.unwrap=T)
+best_lambda = learner_model$lambda.min
+lambda_idx = which(learner_model$lambda == best_lambda)
+beta_coeffs = learner_model$glmnet.fit$beta[,lambda_idx]
+tibble(beta_coeff = names(learner_model$coefficients), beta_val = as.numeric(learner_model$coefficients)) %>%
+  ggplot(aes(x=beta_coeff, y=beta_val)) + geom_bar(stat='identity') + coord_flip()
 
-#lrn_tuned = setPredictType(lrn_tuned, predict.type='prob')
-model = train(lrn_tuned, ml_baseline, subset=learntrain)
+train_pred = predict(pipe_seed_diff$model, task = pipe_seed_diff$task, subset = alltrain)
+train_pred
 
-# Performance on train set
-pred = predict(model, task = ml_baseline, subset = learntrain)
-performance(pred, measures = list(acc))
+submission_pred = predict(pipe_seed_diff$model, task = pipe_seed_diff$task, subset = alltest)
+submission_probs = getPredictionProbabilities(submission_pred, cl='1')
 
-# Performance on test set
-pred = predict(model, task = ml_baseline, subset = learntest)
-performance(pred, measures = list(acc))
+submission_glmnet = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
+submission_glmnet
 
-calculateConfusionMatrix(pred, relative=T)
-#get_eval_metric(pred$data$truth, pred$data$response)
+write.csv(submission_glmnet, 'submissions/logreg_seed_diff.csv', quote = F, row.names = F)
+```
+
+### Try random forest
+This performs equally well as glmnet. More features should probably be included.
+```{r}
+pipe_xbg = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(-ID, -set, -team1, -team2, -seed_reg, -seed_reg_2) %>% mutate(Pred = factor(Pred)), 
+                            target_feat = 'Pred', 
+                            learner_val = 'classif.xgboost', 
+                            #learner_val = 'classif.randomForest', 
+                            subset_train = learntrain, 
+                            subset_test = learntest)
+
+submission_pred = predict(pipe_xbg$model, task = pipe_xbg$task, subset = alltest)
+submission_probs = getPredictionProbabilities(submission_pred, cl='1')
+
+submission_xgb = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
+submission_xgb
+
+write.csv(submission_xgb, 'submissions/xgb.csv', quote = F, row.names = F)
 ```
