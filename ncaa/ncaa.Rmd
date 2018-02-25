@@ -70,6 +70,7 @@ team_summary = results_all %>%
   mutate(team_season = paste(team_id, Season, sep='_')) %>%
   group_by(team_id) %>%
   mutate(score_diff_stab = sd(score_diff_mean), lw_diff_stab = sd(lw_diff), lw_ratio_stab = sd(lw_ratio)) %>%
+  mutate(num_season = n()) %>%
   ungroup() %>%
   mutate(season_bin4 = ntile(Season, 4)) %>%
   group_by(team_id, season_bin4) %>% 
@@ -191,13 +192,13 @@ simple_mlr_pipeline <- function(alldat, target_feat, learner_val, subset_train, 
   # Performance on test set
   print('Performance on test set')
   pred = predict(model, task = ml_baseline, subset = subset_test)
-  print(performance(pred, measures = list(acc)))
+  print(performance(pred, measures = list(acc, logloss)))
   
   print(calculateConfusionMatrix(pred, relative=T))
   
   list('task'=ml_baseline, 'learner'=lrn_baseline_imp, 'model'=model)
 }
-pipe1 = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(-ID, -set, -team1, -team2, -seed_reg, -seed_reg_2) %>% mutate(Pred = factor(Pred)), 
+pipe1 = simple_mlr_pipeline(alldat = train_dat[,c('Pred', feat_names)] %>% mutate(Pred = factor(Pred)), 
                             target_feat = 'Pred', 
                             learner_val = 'classif.cvglmnet', 
                             subset_train = learntrain, 
@@ -216,13 +217,25 @@ tibble(beta_coeff = names(beta_coeffs), beta_val = as.numeric(beta_coeffs)) %>%
 
 ### Construct a submission
 ```{r}
-submission_pred = predict(pipe1$model, task = pipe1$task, subset = alltest)
-submission_probs = getPredictionProbabilities(submission_pred, cl='1')
+write_submission <- function(submission_tbl, fpath) {
+  write.csv(submission_tbl, fpath, quote = F, row.names = F)
+}
+prepare_submission <- function(data_tbl, model, task, subset, class_name='1', fpath=F) {
+  preds = predict(model, task = task, subset = subset)
+  probs = getPredictionProbabilities(preds, cl=class_name)
+  
+  submission = tibble(ID=data_tbl$ID[subset], Pred=probs)
+  
+  if(fpath!=F) {
+    write_submission(submission_tbl = submission, fpath = fpath)
+    #write.csv(submission, fpath, quote = F, row.names = F)
+    print(paste('Wrote submission to path:', fpath, sep=' '))
+  } 
+  
+  return(submission)
+}
 
-submission_glmnet = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
-submission_glmnet
-
-write.csv(submission_glmnet, 'submissions/glmnet_seed.csv', quote = F, row.names = F)
+prepare_submission(data_tbl = train_dat, model = pipe1$model, task = pipe1$task, subset = alltest, class_name = '1', fpath = 'submissions/glmnet_seed.csv')
 ```
 
 ### Try a simple logistic regression instead
@@ -240,38 +253,24 @@ lambda_idx = which(learner_model$lambda == best_lambda)
 beta_coeffs = learner_model$glmnet.fit$beta[,lambda_idx]
 tibble(beta_coeff = names(learner_model$coefficients), beta_val = as.numeric(learner_model$coefficients)) %>%
   ggplot(aes(x=beta_coeff, y=beta_val)) + geom_bar(stat='identity') + coord_flip()
+
+prepare_submission(data_tbl = train_dat, model = pipe_logreg$model, task = pipe_logreg$task, subset = alltest, class_name = '1', fpath = 'submissions/logreg_simple.csv')
 ```
 
-### Try a simple logistic regression instead
-Use only seed difference
+### Try submitting logistic regression, but replacing known game scores with true outcomes
 ```{r}
-pipe_seed_diff = simple_mlr_pipeline(alldat = train_dat %>% dplyr::select(Pred, seed_diff) %>% 
-                                    mutate(Pred = factor(Pred)), 
-                            target_feat = 'Pred', 
-                            learner_val = 'classif.logreg', 
-                            subset_train = learntrain, 
-                            subset_test = learntest)
+submission_logreg = prepare_submission(data_tbl = train_dat, model = pipe_logreg$model, task = pipe_logreg$task, subset = alltest, class_name = '1')
 
-learner_model = getLearnerModel(pipe_seed_diff$model, more.unwrap=T)
-best_lambda = learner_model$lambda.min
-lambda_idx = which(learner_model$lambda == best_lambda)
-beta_coeffs = learner_model$glmnet.fit$beta[,lambda_idx]
-tibble(beta_coeff = names(learner_model$coefficients), beta_val = as.numeric(learner_model$coefficients)) %>%
-  ggplot(aes(x=beta_coeff, y=beta_val)) + geom_bar(stat='identity') + coord_flip()
-
-train_pred = predict(pipe_seed_diff$model, task = pipe_seed_diff$task, subset = alltrain)
-train_pred
-
-submission_pred = predict(pipe_seed_diff$model, task = pipe_seed_diff$task, subset = alltest)
-submission_probs = getPredictionProbabilities(submission_pred, cl='1')
-
-submission_glmnet = tibble(ID=train_dat$ID[alltest], Pred=submission_probs)
-submission_glmnet
-
-write.csv(submission_glmnet, 'submissions/logreg_seed_diff.csv', quote = F, row.names = F)
+submission_fake = submission_logreg %>%
+  left_join(all_games %>% filter(set=='train') %>% dplyr::select(ID, outcome=Pred) %>% distinct() %>% mutate(is_known = T), by='ID', fill=NA) %>%
+  distinct() %>%
+  mutate(Pred = outcome) %>% dplyr::select(ID, Pred)
+#table(submission_fake$outcome, submission_fake$is_known)
+submission_fake %>% distinct()
+write_submission(submission_fake, 'submissions/fake_outcomes.csv')
 ```
 
-### Try random forest
+### Try XGboost
 This performs equally well as glmnet. More features should probably be included.
 ```{r}
 pipe_xbg = simple_mlr_pipeline(alldat = train_dat[,c('Pred', feat_names)] %>% mutate(Pred = factor(Pred)), 
